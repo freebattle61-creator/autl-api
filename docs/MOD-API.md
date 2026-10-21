@@ -1,5 +1,7 @@
 # Mod APIs
 
+**Review only:** KURO, diagnostics, and the premium selectors are implemented on PR #3, not deployed or merged. The base URL below is the existing service; the KURO examples require owner-approved deployment first. Existing AIM CHETO and Samurai Engine remain on the current live release.
+
 Base URL: `https://auth-api-zzhn-bzf6.onrender.com`
 
 All three products use the existing license routes. Select the product explicitly in activation requests to prevent using another mod's key.

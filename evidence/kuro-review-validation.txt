@@ -1,0 +1,32 @@
+KURO / premium selectors / diagnostics — REVIEW ONLY
+
+PR: https://github.com/freebattle61-creator/autl-api/pull/3
+Branch: feat/kuro-pricing-diagnostics
+Production deployment: NOT performed. PR remains open and unmerged.
+Current production Render deploy observed: dep-dbck32cs728c73fa1q30
+Current production commit: 3e0428a4b54c307565f4e30c145ea1a7f810138a (previous AIM CHETO release)
+
+Passed on the final implementation:
+- npm run lint
+- npm run build
+- npm run test:products
+- npm test
+- npm run test:diagnostics
+- npm run test:startup
+- npm run test:firebase-safety
+- npm run test:maintenance
+- git diff --check
+
+Product tests cover separate KURO prices/durations, admin-only edits, admin/reseller generation, exact reseller debits, mod matching, heartbeat, issue-price history, issuer attribution, SQLite restart, and preservation of existing products/legacy records.
+Diagnostics tests cover NDJSON validation, nested/unknown field preservation, empty traces, field/body limits, malformed UTF-8, pause, SQLite persistence, failed-write no acknowledgement, mocked Firebase sibling storage/transaction behavior, and conflicting batch IDs.
+Actual new diagnostics writes were NOT tested against production Firebase. No production keys, prices, accounts, balances, or diagnostics were changed by this task. A read-only pre-release snapshot was taken privately.
+
+Browser preview is an isolated local SQLite fixture at port 8483, not the production service. Premium selection and KURO selected state visually verified. Do not interpret local fixture/example prices as approved production prices.
+Screenshot: evidence/kuro-premium-selector-preview.png
+
+Original request specification preserved byte-for-byte:
+docs/diagnostics-api-spec-original.txt
+SHA-256: fd1283f5a740e1ef676968a16163d8484146c8c909b37feca7c6dda0446ac9e3
+
+API usage: docs/MOD-API.md
+No update-check, APK download, signing, or verification endpoints were added.
