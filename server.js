@@ -1,119 +1,241 @@
 // server.ts
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import path from "path";
+import path2 from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
-import fs from "fs";
+import fs2 from "fs";
+import os from "os";
 import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
-import * as adminImport from "firebase-admin";
-var admin = adminImport.default || adminImport;
-dotenv.config();
-var __dirname = path.dirname(fileURLToPath(import.meta.url));
-var rtdb = null;
-try {
-  if (admin && admin.apps && !admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-      databaseURL: process.env.FIREBASE_DATABASE_URL || "https://poised-balancer-9t8c4-default-rtdb.firebaseio.com"
-    });
-    console.log("Firebase Admin SDK initialized successfully.");
+import { DatabaseSync } from "node:sqlite";
+
+// firebase-store.ts
+import fs from "node:fs";
+import path from "node:path";
+import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
+import { getDatabase } from "firebase-admin/database";
+function firebaseOptions(env = process.env, baseDir = process.cwd()) {
+  const databaseURL = env.FIREBASE_DATABASE_URL?.trim();
+  if (!databaseURL) throw new Error("Set FIREBASE_DATABASE_URL to your Firebase Realtime Database URL.");
+  let url;
+  try {
+    url = new URL(databaseURL);
+  } catch {
+    throw new Error("FIREBASE_DATABASE_URL must be a valid HTTPS URL.");
   }
-  if (admin && admin.database) {
-    rtdb = admin.database();
+  if (url.protocol !== "https:" || !/\.(firebaseio\.com|firebasedatabase\.app)$/.test(url.hostname) || url.pathname !== "/" || url.search || url.hash || url.username || url.password) {
+    throw new Error("FIREBASE_DATABASE_URL must be an HTTPS Firebase RTDB instance URL, without a path or query.");
   }
-} catch (e) {
-  console.warn("Firebase Admin SDK could not be initialized (using local JSON storage fallback):", e);
+  const databasePath = env.FIREBASE_DATABASE_PATH?.trim() || "/license_api";
+  if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(databasePath)) {
+    throw new Error("FIREBASE_DATABASE_PATH must be a non-root path such as /license_api.");
+  }
+  let account;
+  const inline = env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  const base64 = env.FIREBASE_SERVICE_ACCOUNT_BASE64?.trim();
+  const file = env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  try {
+    if (inline) account = JSON.parse(inline);
+    else if (base64) account = JSON.parse(Buffer.from(base64, "base64").toString("utf8"));
+    else if (file) account = JSON.parse(fs.readFileSync(path.resolve(baseDir, file), "utf8"));
+  } catch {
+    throw new Error("Firebase service-account JSON is unreadable or invalid. Check the credential environment variable or secret file.");
+  }
+  if (account) {
+    if (typeof account.project_id !== "string" || typeof account.client_email !== "string" || typeof account.private_key !== "string") {
+      throw new Error("Firebase service account requires project_id, client_email and private_key.");
+    }
+    account.private_key = account.private_key.replace(/\\n/g, "\n");
+  }
+  return { databaseURL, databasePath, credential: account ? cert(account) : applicationDefault() };
 }
-var DB_FILE = path.join(__dirname, "database.json");
-var dbData = {
-  admin: { username: "shadowcracker", password_hash: bcrypt.hashSync("Sh@d0w_Cr@ck3r_X9#99!Secure", 10) },
-  resellers: [
-    { id: 1, username: "reseller1", password_hash: bcrypt.hashSync("reseller123", 10), balance: 150, is_active: 1, created_at: (/* @__PURE__ */ new Date()).toISOString(), note: "VIP Reseller" }
-  ],
-  prices: [
-    { duration_days: 1, price: 5 },
-    { duration_days: 3, price: 12 },
-    { duration_days: 7, price: 25 },
-    { duration_days: 30, price: 80 },
-    { duration_days: 365, price: 500 }
-  ],
-  keys: [],
-  sessions: [],
-  balance_logs: []
-};
+function initializeFirebaseStore(env = process.env, baseDir = process.cwd()) {
+  const options = firebaseOptions(env, baseDir);
+  const name = "license-api";
+  const app = getApps().find((app2) => app2.name === name) || initializeApp({ credential: options.credential, databaseURL: options.databaseURL }, name);
+  return getDatabase(app).ref(options.databasePath);
+}
+async function firebaseOperation(operation, label) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let timer;
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timeout")), 15e3);
+        })
+      ]);
+    } catch {
+      if (attempt === 3) throw new Error(`Firebase ${label} failed after 3 attempts. Check credentials, database URL, permissions and network connectivity.`);
+      console.warn(`Firebase ${label} temporarily unavailable; retry ${attempt}/2.`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  throw new Error(`Firebase ${label} failed.`);
+}
+
+// server.ts
+var __dirname = path2.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path2.join(__dirname, ".env"), quiet: true });
+var DB_FILE = process.env.LICENSE_DB_FILE || path2.join(os.homedir(), ".license-api", "license.sqlite");
+var sqlite = null;
+var rtdb = null;
+var revision = 0;
+var dbData = { admin: { username: "", password_hash: "" }, resellers: [], prices: [], keys: [], sessions: [], balance_logs: [] };
+var defaults = () => ({ admin: { username: "", password_hash: "" }, resellers: [], prices: [{ duration_days: 1, price: 5 }, { duration_days: 3, price: 12 }, { duration_days: 7, price: 25 }, { duration_days: 30, price: 80 }, { duration_days: 365, price: 500 }], keys: [], sessions: [], balance_logs: [] });
+function validateState(v) {
+  if (!v || typeof v !== "object" || !v.admin || typeof v.admin.username !== "string" || !v.admin.username || typeof v.admin.password_hash !== "string" || !v.admin.password_hash || !Array.isArray(v.resellers) || !Array.isArray(v.prices) || !Array.isArray(v.keys) || !Array.isArray(v.sessions) || !Array.isArray(v.balance_logs)) throw new Error("Configured database contains an incompatible nonempty schema; refusing overwrite.");
+  return { admin: v.admin, resellers: v.resellers, prices: v.prices, keys: v.keys, sessions: v.sessions, balance_logs: v.balance_logs };
+}
+function conflict(message = "Database changed concurrently; retry the request") {
+  const e = Object.assign(new Error(message), { status: 409, code: 1909 });
+  return e;
+}
+async function initializeStorage() {
+  process.umask(63);
+  if (process.env.FIREBASE_DATABASE_URL) {
+    rtdb = initializeFirebaseStore(process.env, __dirname);
+    return;
+  }
+  fs2.mkdirSync(path2.dirname(DB_FILE), { recursive: true, mode: 448 });
+  sqlite = new DatabaseSync(DB_FILE);
+  fs2.chmodSync(DB_FILE, 384);
+  sqlite.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, value TEXT NOT NULL);");
+  sqlite.prepare("INSERT OR IGNORE INTO state(id,revision,value) VALUES(1,0,?)").run(JSON.stringify(defaults()));
+}
 async function loadDb() {
   if (rtdb) {
-    try {
-      const snap = await rtdb.ref("/").once("value");
-      const val = snap.val();
-      if (val) {
-        dbData = {
-          admin: val.admin || dbData.admin,
-          resellers: val.resellers || dbData.resellers,
-          prices: val.prices || dbData.prices,
-          keys: val.keys || [],
-          sessions: val.sessions || [],
-          balance_logs: val.balance_logs || []
-        };
-        console.log("Database loaded from Firebase Realtime Database.");
-        return;
-      }
-    } catch (e) {
-      console.warn("Firebase load failed, falling back to local database.json:", e);
-    }
-  }
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const content = fs.readFileSync(DB_FILE, "utf-8");
-      const val = JSON.parse(content);
-      dbData = {
-        admin: val.admin || dbData.admin,
-        resellers: val.resellers || dbData.resellers,
-        prices: val.prices || dbData.prices,
-        keys: val.keys || [],
-        sessions: val.sessions || [],
-        balance_logs: val.balance_logs || []
-      };
-      console.log("Database loaded from local database.json.");
-    } else {
-      const adminUser = process.env.ADMIN_USERNAME || "shadowcracker";
-      const adminPass = process.env.ADMIN_PASSWORD || "Sh@d0w_Cr@ck3r_X9#99!Secure";
-      dbData.admin = { username: adminUser, password_hash: bcrypt.hashSync(adminPass, 10) };
+    const snap = await firebaseOperation(() => rtdb.once("value"), "read");
+    const raw = snap.val();
+    if (raw === null) {
+      const p = process.env.ADMIN_PASSWORD?.trim();
+      if (!p) throw new Error("ADMIN_PASSWORD is required when initializing an empty database");
+      dbData = defaults();
+      dbData.admin = { username: process.env.ADMIN_USERNAME?.trim() || "admin", password_hash: await bcrypt.hash(p, 12) };
+      revision = 0;
       await saveDb();
-      console.log("Created and seeded initial local database.json.");
+      return;
     }
-  } catch (e) {
-    console.error("Error loading local database.json:", e);
+    if (!Number.isSafeInteger(raw.revision) || raw.revision < 1) throw new Error("Configured Firebase data has no valid numeric revision; refusing incompatible schema.");
+    revision = raw.revision;
+    const normalized = { ...raw };
+    for (const field of ["resellers", "prices", "keys", "sessions", "balance_logs"]) if (normalized[field] === void 0 || normalized[field] === null) normalized[field] = [];
+    dbData = validateState(normalized);
+    return;
   }
+  const row = sqlite.prepare("SELECT revision,value FROM state WHERE id=1").get();
+  if (!row) throw new Error("SQLite state row missing");
+  revision = Number(row.revision);
+  const parsed = JSON.parse(row.value);
+  if (!parsed.admin?.password_hash) {
+    if (revision !== 0 || JSON.stringify(parsed) !== JSON.stringify(defaults())) throw new Error("Incompatible nonempty SQLite schema; refusing initialization");
+    const p = process.env.ADMIN_PASSWORD?.trim();
+    if (!p) throw new Error("ADMIN_PASSWORD is required when initializing an empty database");
+    const seeded = defaults();
+    seeded.admin = { username: process.env.ADMIN_USERNAME?.trim() || "admin", password_hash: await bcrypt.hash(p, 12) };
+    dbData = seeded;
+    await saveDb();
+  } else dbData = validateState(parsed);
 }
 async function saveDb() {
+  const expected = revision;
   if (rtdb) {
-    try {
-      await rtdb.ref("/").set(dbData);
-    } catch (e) {
-      console.error("Firebase save warning:", e);
+    let conflictSeen = false;
+    const result2 = await firebaseOperation(() => rtdb.transaction((current) => {
+      if (current === null) {
+        if (expected !== 0) {
+          conflictSeen = true;
+          return;
+        }
+        return { ...dbData, revision: 1 };
+      }
+      if (typeof current.revision !== "number" || current.revision !== expected) {
+        conflictSeen = true;
+        return;
+      }
+      return { ...dbData, revision: expected + 1 };
+    }), "CAS transaction");
+    if (conflictSeen || !result2.committed) {
+      await loadDb();
+      throw conflict();
     }
+    revision = expected + 1;
+    return;
   }
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(dbData, null, 2), "utf-8");
-  } catch (e) {
-    console.error("Error saving local database.json:", e);
+  const result = sqlite.prepare("UPDATE state SET value=?, revision=revision+1 WHERE id=1 AND revision=?").run(JSON.stringify(dbData), expected);
+  if (Number(result.changes) !== 1) {
+    await loadDb();
+    throw conflict();
   }
+  revision = expected + 1;
 }
 function generateKey() {
-  const part1 = crypto.randomBytes(2).toString("hex").toUpperCase();
-  const part2 = crypto.randomBytes(2).toString("hex").toUpperCase();
-  const part3 = crypto.randomBytes(2).toString("hex").toUpperCase();
-  const part4 = crypto.randomBytes(2).toString("hex").toUpperCase();
-  return `SH-${part1}-${part2}-${part3}-${part4}`;
+  return `SH-${crypto.randomBytes(2).toString("hex").toUpperCase()}-${crypto.randomBytes(2).toString("hex").toUpperCase()}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+}
+function alias(body, a, b) {
+  const x = body?.[a], y = body?.[b];
+  if (x !== void 0 && typeof x !== "string" || y !== void 0 && typeof y !== "string") throw Object.assign(new Error(`${a} and ${b} must be strings`), { status: 400, code: 1001 });
+  if (x !== void 0 && y !== void 0 && x !== y) throw Object.assign(new Error(`Conflicting ${a} and ${b}`), { status: 400, code: 1001 });
+  const v = x ?? y;
+  if (!v || !v.trim() || v.length > 512) throw Object.assign(new Error(`${a} is required`), { status: 400, code: 1001 });
+  return v.trim();
 }
 async function startServer() {
+  await initializeStorage();
   await loadDb();
   const app = express();
-  app.use(express.json());
+  app.set("trust proxy", 1);
+  app.use(express.json({ limit: "32kb" }));
+  for (const method of ["get", "post", "delete", "put", "patch"]) {
+    const original = app[method].bind(app);
+    app[method] = (route, ...handlers) => original(route, ...handlers.map((h) => (req, res, next) => {
+      req._activeHandlers = (req._activeHandlers || 0) + 1;
+      return Promise.resolve().then(() => h(req, res, next)).catch(next).finally(() => {
+        req._activeHandlers--;
+        req._releaseRequest?.();
+      });
+    }));
+  }
+  let requestQueue = Promise.resolve();
+  app.use((req, res, next) => {
+    const prior = requestQueue;
+    let release;
+    requestQueue = new Promise((resolve) => release = resolve);
+    prior.then(async () => {
+      try {
+        await loadDb();
+        if (res.destroyed) {
+          release();
+          return;
+        }
+        let done = false, ended = false;
+        req._releaseRequest = () => {
+          if (ended && !done && !(req._activeHandlers > 0)) {
+            done = true;
+            release();
+          }
+        };
+        const finish = () => {
+          ended = true;
+          req._releaseRequest();
+        };
+        res.once("finish", finish);
+        res.once("close", finish);
+        next();
+      } catch (e) {
+        release();
+        next(e);
+      }
+    }, (e) => {
+      release();
+      next(e);
+    });
+  });
   const webSessions = /* @__PURE__ */ new Map();
+  app.get("/api/health", (_req, res) => res.json({ success: true, storage: rtdb ? "firebase" : "sqlite", ready: true }));
   app.post("/api/auth/login", async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -385,9 +507,8 @@ async function startServer() {
   });
   app.post("/api/activate", async (req, res) => {
     await loadDb();
-    const { license_key, key, hwid, device_fingerprint, device_id } = req.body;
-    const targetKey = license_key || key;
-    const targetHwid = hwid || device_fingerprint || device_id;
+    const targetKey = alias(req.body, "license_key", "key");
+    const hwid = alias(req.body, "device_fingerprint", "hwid");
     if (!targetKey) {
       return res.status(400).json({
         success: false,
@@ -396,11 +517,11 @@ async function startServer() {
         session_id: null
       });
     }
-    if (!targetHwid) {
+    if (!hwid) {
       return res.status(400).json({
         success: false,
         error_code: 1005,
-        message: "HWID or device_fingerprint is required for device binding",
+        message: "HWID is required for device binding",
         session_id: null
       });
     }
@@ -424,9 +545,12 @@ async function startServer() {
     if (!kRow.hwid_list) kRow.hwid_list = [];
     if (!kRow.max_devices) kRow.max_devices = 1;
     const now = /* @__PURE__ */ new Date();
+    if (!Array.isArray(kRow.hwid_list) || !Number.isSafeInteger(kRow.max_devices) || kRow.max_devices < 1 || !Number.isFinite(kRow.duration_days) || kRow.duration_days <= 0 || Boolean(kRow.activated_at) !== Boolean(kRow.expires_at)) throw Object.assign(new Error("Stored license state is corrupt"), { status: 500, code: 1501 });
+    if (!kRow.activated_at && !kRow.hwid_list.includes(hwid) && kRow.hwid_list.length >= kRow.max_devices) return res.status(403).json({ success: false, error_code: 1006, message: "Device limit reached", session_id: null });
     if (kRow.activated_at && kRow.expires_at) {
       const expDate = new Date(kRow.expires_at);
-      if (now > expDate) {
+      if (!Number.isFinite(expDate.getTime())) throw Object.assign(new Error("Stored license expiration is corrupt"), { status: 500, code: 1501 });
+      if (!Number.isFinite(expDate.getTime()) || now.getTime() >= expDate.getTime()) {
         return res.status(400).json({
           success: false,
           error_code: 1004,
@@ -434,7 +558,7 @@ async function startServer() {
           session_id: null
         });
       }
-      if (!kRow.hwid_list.includes(targetHwid)) {
+      if (!kRow.hwid_list.includes(hwid)) {
         if (kRow.hwid_list.length >= kRow.max_devices) {
           return res.status(403).json({
             success: false,
@@ -443,14 +567,14 @@ async function startServer() {
             session_id: null
           });
         }
-        kRow.hwid_list.push(targetHwid);
+        kRow.hwid_list.push(hwid);
       }
       const sessionId2 = crypto.randomBytes(16).toString("hex");
-      const sessionExpires2 = new Date(now.getTime() + 24 * 60 * 60 * 1e3).toISOString();
+      const sessionExpires2 = new Date(Math.min(expDate.getTime(), now.getTime() + Math.max(1, Number(process.env.SESSION_TTL_SECONDS) || 3600) * 1e3)).toISOString();
       dbData.sessions.push({
         session_id: sessionId2,
         key_value: targetKey,
-        hwid: targetHwid,
+        hwid,
         created_at: now.toISOString(),
         last_heartbeat: now.toISOString(),
         expires_at: sessionExpires2
@@ -463,6 +587,7 @@ async function startServer() {
         session_id: sessionId2,
         expires_at: kRow.expires_at,
         plan: `${kRow.duration_days} Days`,
+        session_expires_at: sessionExpires2,
         heartbeat_interval: 60,
         user: {
           expires_at: kRow.expires_at
@@ -475,14 +600,14 @@ async function startServer() {
     const activatedAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + kRow.duration_days * 24 * 60 * 60 * 1e3).toISOString();
     const sessionId = crypto.randomBytes(16).toString("hex");
-    const sessionExpires = new Date(now.getTime() + 24 * 60 * 60 * 1e3).toISOString();
+    const sessionExpires = new Date(Math.min(new Date(expiresAt).getTime(), now.getTime() + Math.max(1, Number(process.env.SESSION_TTL_SECONDS) || 3600) * 1e3)).toISOString();
     kRow.activated_at = activatedAt;
     kRow.expires_at = expiresAt;
-    kRow.hwid_list.push(targetHwid);
+    kRow.hwid_list.push(hwid);
     dbData.sessions.push({
       session_id: sessionId,
       key_value: targetKey,
-      hwid: targetHwid,
+      hwid,
       created_at: now.toISOString(),
       last_heartbeat: now.toISOString(),
       expires_at: sessionExpires
@@ -495,6 +620,7 @@ async function startServer() {
       session_id: sessionId,
       expires_at: expiresAt,
       plan: `${kRow.duration_days} Days`,
+      session_expires_at: sessionExpires,
       heartbeat_interval: 60,
       user: {
         expires_at: expiresAt
@@ -506,25 +632,27 @@ async function startServer() {
   });
   app.post("/api/heartbeat", async (req, res) => {
     await loadDb();
-    const { license_key, key, session_id, hwid, device_fingerprint, device_id } = req.body;
-    const targetKey = license_key || key;
-    const targetHwid = hwid || device_fingerprint || device_id;
-    if (!targetKey || !session_id || !targetHwid) {
+    const targetKey = alias(req.body, "license_key", "key");
+    const hwid = alias(req.body, "device_fingerprint", "hwid");
+    const session_id = typeof req.body?.session_id === "string" ? req.body.session_id : (() => {
+      throw Object.assign(new Error("session_id is required"), { status: 400, code: 2001 });
+    })();
+    if (!targetKey || !session_id || !hwid) {
       return res.status(400).json({
         success: false,
         error_code: 2001,
-        message: "license_key, session_id, and hwid/device_fingerprint are required for heartbeat"
+        message: "license_key, session_id, and hwid are required for heartbeat"
       });
     }
     const session = dbData.sessions.find((s) => s.session_id === session_id && s.key_value === targetKey);
-    if (!session) {
+    if (!session || session.revoked) {
       return res.status(401).json({
         success: false,
         error_code: 2002,
         message: "Invalid, revoked, or expired session ID"
       });
     }
-    if (session.hwid !== targetHwid) {
+    if (session.hwid !== hwid) {
       return res.status(403).json({
         success: false,
         error_code: 2005,
@@ -532,7 +660,7 @@ async function startServer() {
       });
     }
     const now = /* @__PURE__ */ new Date();
-    if (now > new Date(session.expires_at)) {
+    if (!Number.isFinite(Date.parse(session.expires_at)) || now.getTime() >= Date.parse(session.expires_at)) {
       return res.status(401).json({
         success: false,
         error_code: 2006,
@@ -547,14 +675,15 @@ async function startServer() {
         message: "License key is invalid or disabled"
       });
     }
-    if (kRow.expires_at && now > new Date(kRow.expires_at)) {
+    if (!kRow.activated_at || !kRow.expires_at) return res.status(403).json({ success: false, error_code: 2003, message: "License activation state is invalid" });
+    if (kRow.expires_at && (!Number.isFinite(Date.parse(kRow.expires_at)) || now.getTime() >= Date.parse(kRow.expires_at))) {
       return res.status(400).json({
         success: false,
         error_code: 2004,
         message: "License has expired"
       });
     }
-    if (!kRow.hwid_list || !kRow.hwid_list.includes(targetHwid)) {
+    if (!kRow.hwid_list || !kRow.hwid_list.includes(hwid)) {
       return res.status(403).json({
         success: false,
         error_code: 2007,
@@ -569,6 +698,8 @@ async function startServer() {
       message: "Heartbeat OK",
       session_id: session.session_id,
       expires_at: kRow.expires_at,
+      plan: `${kRow.duration_days} Days`,
+      session_expires_at: session.expires_at,
       heartbeat_interval: 60,
       user: {
         expires_at: kRow.expires_at
@@ -578,14 +709,29 @@ async function startServer() {
       }
     });
   });
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: "spa"
+  app.use((err, _req, res, _next) => {
+    const status = Number(err?.status) || 500;
+    if (status >= 500) console.error("Request failed; private details omitted");
+    return res.status(status).json({ success: false, error_code: Number(err?.code) || 1500, message: err?.type === "entity.parse.failed" ? "Malformed JSON" : status < 500 ? err?.message || "Request failed" : "Internal server error" });
   });
-  app.use(vite.middlewares);
+  if (process.env.NODE_ENV === "production") {
+    app.use(express.static(path2.join(__dirname, "dist")));
+    app.get("*", (_req, res) => {
+      res.sendFile(path2.join(__dirname, "dist", "index.html"));
+    });
+  } else {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa"
+    });
+    app.use(vite.middlewares);
+  }
   const port = typeof process.env.PORT === "string" ? parseInt(process.env.PORT, 10) : process.env.PORT || 3e3;
-  app.listen(port, "0.0.0.0", () => {
+  app.listen(port, process.env.HOST || "127.0.0.1", () => {
     console.log(`Server running on http://localhost:${port}`);
   });
 }
-startServer();
+void startServer().catch((error) => {
+  console.error("Startup failed:", error.message);
+  process.exit(1);
+});

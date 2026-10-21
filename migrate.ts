@@ -1,48 +1,25 @@
-import * as adminImport from 'firebase-admin';
-const admin = (adminImport as any).default || adminImport;
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from 'node:fs';
+import path from 'node:path';
 import dotenv from 'dotenv';
+import { initializeFirebaseStore, firebaseOperation } from './firebase-store';
 
-dotenv.config();
+dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
+const source = process.env.MIGRATION_SOURCE_FILE?.trim();
+const allow = process.env.MIGRATION_ALLOW_WRITE === '1';
+if (!source) throw new Error('Set MIGRATION_SOURCE_FILE to an explicit JSON file');
+if (!process.env.FIREBASE_DATABASE_URL || !process.env.FIREBASE_DATABASE_PATH) throw new Error('Set FIREBASE_DATABASE_URL and a non-root FIREBASE_DATABASE_PATH');
+if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(process.env.FIREBASE_DATABASE_PATH)) throw new Error('FIREBASE_DATABASE_PATH must be a non-root path');
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_FILE = path.join(__dirname, 'database.json');
-
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-    databaseURL: process.env.FIREBASE_DATABASE_URL || 'https://poised-balancer-9t8c4-default-rtdb.firebaseio.com'
-  });
+async function main() {
+  const raw = JSON.parse(fs.readFileSync(path.resolve(source!), 'utf8'));
+  if (!raw?.admin?.username || !raw?.admin?.password_hash) throw new Error('Source must contain an admin credential hash');
+  const fields = ['resellers', 'prices', 'keys', 'sessions', 'balance_logs'];
+  if (fields.some(field => !Array.isArray(raw[field]))) throw new Error('Source must contain all six API data fields with array values');
+  const data = { admin: raw.admin, resellers: raw.resellers, prices: raw.prices, keys: raw.keys, sessions: raw.sessions, balance_logs: raw.balance_logs };
+  const ref = initializeFirebaseStore(process.env, process.cwd());
+  if (!allow) { console.log('Dry run only; source validated and no destination read/write was performed. Set MIGRATION_ALLOW_WRITE=1 to commit.'); return; }
+  const result = await firebaseOperation(() => ref.transaction((current: any) => current === null ? { ...data, revision: 1 } : undefined), 'migration CAS');
+  if (!result.committed) throw new Error('Destination is no longer empty; refusing overwrite');
+  console.log('Migration completed to the configured isolated path with all six data fields.');
 }
-
-async function migrate() {
-  if (!fs.existsSync(DB_FILE)) {
-    console.log('No database.json found to migrate.');
-    return;
-  }
-  const content = fs.readFileSync(DB_FILE, 'utf-8');
-  const data = JSON.parse(content);
-
-  const rtdb = admin.database();
-  const rootRef = rtdb.ref('/');
-
-  console.log('Starting migration of database.json to Firebase Realtime Database...');
-  await rootRef.set({
-    admin: data.admin || { username: 'shadowcracker', password_hash: '' },
-    resellers: data.resellers || [],
-    prices: data.prices || [],
-    keys: data.keys || [],
-    sessions: data.sessions || [],
-    balance_logs: data.balance_logs || []
-  });
-
-  console.log('Migration completed successfully!');
-  process.exit(0);
-}
-
-migrate().catch(err => {
-  console.error('Migration failed:', err);
-  process.exit(1);
-});
+main().catch(e => { console.error('Migration failed:', e.message); process.exit(1); });
