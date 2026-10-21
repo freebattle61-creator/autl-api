@@ -6,3 +6,17 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Never commit Firebase private keys or local data
+*service-account*.json
+*serviceAccount*.json
+database.json
+
+# Local test/runtime artifacts are not release sources.
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+.aistudio/

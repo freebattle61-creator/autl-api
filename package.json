@@ -8,7 +8,10 @@
     "start": "NODE_ENV=production node server.js",
     "test": "tsx test.ts",
     "clean": "rm -rf dist server.js database.json",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:startup": "tsx startup.test.ts",
+    "test:firebase-safety": "tsx firebase-safety.test.ts",
+    "test:maintenance": "tsx maintenance.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -31,9 +34,13 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
+    "esbuild": "0.28.2",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "engines": {
+    "node": "24.x"
   }
 }

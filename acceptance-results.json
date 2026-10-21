@@ -1,0 +1,20 @@
+{
+  "passed": 11,
+  "checks": [
+    "health and private admin login",
+    "authorized generated-license activation, heartbeat, aliases and response fields",
+    "invalid license, conflicting aliases, wrong types and malformed JSON rejected",
+    "activation device limit and heartbeat device binding",
+    "same license and server-issued session survive restart",
+    "expired session fixture rejected",
+    "expired license fixture rejected",
+    "revoked license activation and session rejected",
+    "reset-devices revokes existing sessions",
+    "retained admin/data, reseller creation and prices routes",
+    "24 activations across two processes: exactly one bound device, no lost update"
+  ],
+  "storage": "isolated temporary SQLite",
+  "firebase_tested": false,
+  "android_binary_tested": false,
+  "secrets_included": false
+}
