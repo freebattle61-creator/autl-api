@@ -1,0 +1,111 @@
+Diagnostics API System
+
+Sirf Diagnostics API system implement karna hai. Update-check aur APK-download endpoints is scope mein nahi hain.
+
+1. GET — Upload Permission Check
+
+Endpoint: "GET /api/diagnostics"
+
+- Request body nahi hoga.
+- HTTP 200 par JSON response:
+  "{"receiveLogs":true}"
+- "receiveLogs: true" par client upload kar sakta hai.
+- "receiveLogs: false" par client upload rok dega.
+- HTTP 404 par client upload continue karega.
+- Kisi bhi doosre non-200 status par client upload rok dega.
+
+2. POST — Diagnostic Logs Receive Karna
+
+Endpoint: "POST /api/diagnostics"
+
+Header: "Content-Type: application/x-ndjson"
+
+- Request body NDJSON format mein hoga, normal JSON array nahi.
+- Pehli line batch metadata ka JSON object hogi.
+- Uske baad har line ek diagnostic log record hogi.
+- Har line compact JSON hogi aur newline ("\n") se end hogi.
+- "Content-Length" diya jaye to poore UTF-8 request body ke exact byte count ke barabar hoga.
+
+3. Batch Metadata
+
+Pehli line mein ye fields support honi chahiye:
+
+- "format": integer, value "2"
+- "id": 64-character lowercase SHA-256 hex
+- "installation": persistent installation ID
+- "createdAt": Unix timestamp in milliseconds
+- "loader": string
+- "runtime": string
+- "device": sanitized string, maximum 150 characters
+- "failures": maximum 16 unique failure summaries
+
+Har failure summary mein:
+
+- "id": 64-character lowercase SHA-256 hex
+- "build": string
+- "operation": string, maximum 120 characters
+- "message": string, maximum 480 characters
+
+Batch ID client-side generate karne ka formula:
+
+"SHA-256(installation + newline + failures[0].id)"
+
+Server ko request ka "id" response mein bilkul wahi return karna hai.
+
+HWID, hardware serial number ya serial ID required nahi hai.
+
+4. Diagnostic Log Records
+
+Metadata ke baad har NDJSON line ko ek independent log record ke roop mein parse aur store karna hai.
+
+Common fields:
+
+- "time": integer, Unix timestamp in milliseconds
+- "build": string
+- "process": string
+- "thread": string
+- "operation": string, maximum 120 characters
+- "message": string, maximum 16,000 characters
+- "trace": string, maximum 64,000 characters
+- "failure": optional string
+
+Additional fields bhi support hone chahiye, jaise:
+
+- "level"
+- "pid"
+- "fingerprint"
+- "native"
+- "signal"
+- "threads"
+- "frames"
+- "registers"
+- "libraries"
+- "minidump"
+
+Server ko unknown extra fields reject nahi karne chahiye. Har valid NDJSON line ko parse karke poora record store karna hai, including supported nested crash data.
+
+5. Successful POST Response
+
+Logs successfully store hone ke baad HTTP 200 aur JSON response return karna hai:
+
+"{"id":"<same-request-batch-id>","accepted":["<accepted-failure-id>"]}"
+
+Rules:
+
+- Response ka "id" request metadata ke "id" se exactly match kare.
+- "accepted" mein 1–256 failure IDs hon.
+- Kam-se-kam ek accepted ID request ke "failures[].id" mein present honi chahiye.
+- Sirf successfully stored logs/failures ko acknowledge karna hai.
+- Sirf "{"success":true}" return karna compatible nahi hai.
+- "receiveLogs: false" bhejne se client upload pause kar sakta hai; ise upload pause karne ke liye use kiya ja sakta hai.
+
+6. Implementation Scope
+
+Sirf ye do routes implement karne hain:
+
+1. "GET /api/diagnostics" — upload permission response.
+2. "POST /api/diagnostics" — NDJSON parsing, complete diagnostic data storage aur compatible receipt response.
+
+Update-check endpoint "/api/app/current" aur download endpoint "/api/app/download/{sha256}" is implementation ka hissa nahi hain.
+
+Koi signing system, update verification ya APK download functionality add nahi karni. Diagnostics API ko diye gaye contract ke mutabik implement karna hai.

@@ -86,6 +86,170 @@ async function firebaseOperation(operation, label) {
   throw new Error(`Firebase ${label} failed.`);
 }
 
+// diagnostics.ts
+import { createHash } from "node:crypto";
+var MAX_BODY = 2 * 1024 * 1024;
+var ID = /^[0-9a-f]{64}$/;
+var CONTENT_TYPE = /^application\/x-ndjson(?:\s*;\s*[^;=]+=[^;]+)*$/i;
+function fail(message, status = 400) {
+  throw Object.assign(new Error(message), { status });
+}
+function isObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function stringField(o, name, max, required = false) {
+  const v = o[name];
+  if (typeof v !== "string" || required && !v || v.length > max) fail(`${name} is invalid`);
+  return v;
+}
+function intField(o, name) {
+  const v = o[name];
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) fail(`${name} is invalid`);
+  return v;
+}
+function validate(meta, records) {
+  if (!isObject(meta)) fail("metadata must be an object");
+  if (meta.format !== 2) fail("format must be 2");
+  stringField(meta, "id", 64);
+  if (!ID.test(meta.id)) fail("id is invalid");
+  stringField(meta, "installation", 512, true);
+  intField(meta, "createdAt");
+  stringField(meta, "loader", 512);
+  stringField(meta, "runtime", 512);
+  stringField(meta, "device", 150);
+  if (!Array.isArray(meta.failures) || meta.failures.length < 1 || meta.failures.length > 16) fail("failures is invalid");
+  const seen = /* @__PURE__ */ new Set();
+  for (const f of meta.failures) {
+    if (!isObject(f)) fail("failure is invalid");
+    stringField(f, "id", 64);
+    if (!ID.test(f.id) || seen.has(f.id)) fail("failure id is invalid");
+    seen.add(f.id);
+    stringField(f, "build", 512);
+    stringField(f, "operation", 120);
+    stringField(f, "message", 480);
+  }
+  if (records.length < 1) fail("at least one record is required");
+  for (const r of records) {
+    if (!isObject(r)) fail("record must be an object");
+    intField(r, "time");
+    stringField(r, "build", 512);
+    stringField(r, "process", 512);
+    stringField(r, "thread", 512);
+    stringField(r, "operation", 120);
+    stringField(r, "message", 16e3);
+    stringField(r, "trace", 64e3);
+    if (r.failure !== void 0) stringField(r, "failure", 512, false);
+  }
+  return { meta, records };
+}
+async function readBody(req) {
+  const declared = req.headers["content-length"];
+  let expected;
+  if (declared !== void 0) {
+    if (Array.isArray(declared) || !/^\d+$/.test(declared)) fail("invalid Content-Length");
+    expected = Number(declared);
+    if (!Number.isSafeInteger(expected) || expected > MAX_BODY) fail("request too large", 413);
+  }
+  return await new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    const done = (err, value) => {
+      if (settled) return;
+      settled = true;
+      err ? reject(err) : resolve(value ?? "");
+    };
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        done(Object.assign(new Error("request too large"), { status: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (expected !== void 0 && expected !== size) done(Object.assign(new Error("Content-Length mismatch"), { status: 400 }));
+      else {
+        try {
+          done(void 0, new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+        } catch {
+          done(Object.assign(new Error("body is not valid UTF-8"), { status: 400 }));
+        }
+      }
+    });
+    req.on("aborted", () => done(Object.assign(new Error("request aborted"), { status: 400 })));
+    req.on("error", (e) => done(e));
+  });
+}
+function parseBody(raw) {
+  if (!raw || !raw.endsWith("\n")) fail("NDJSON must end with newline");
+  const lines = raw.split("\n");
+  lines.pop();
+  if (!lines.length || lines.some((line) => !line.trim())) fail("invalid NDJSON line");
+  let meta;
+  const records = [];
+  try {
+    meta = JSON.parse(lines[0]);
+    for (const line of lines.slice(1)) records.push(JSON.parse(line));
+  } catch {
+    fail("invalid JSON");
+  }
+  return validate(meta, records);
+}
+function payloadHash(meta, records) {
+  return createHash("sha256").update(JSON.stringify(meta) + "\n" + records.map((record) => JSON.stringify(record)).join("\n") + "\n").digest("hex");
+}
+async function saveSqlite(db, id, hash, meta, records) {
+  db.exec(`CREATE TABLE IF NOT EXISTS diagnostics_batches (batch_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, metadata_json TEXT NOT NULL, records_json TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+  const old = db.prepare("SELECT payload_hash FROM diagnostics_batches WHERE batch_id=?").get(id);
+  if (old) {
+    if (old.payload_hash !== hash) fail("batch id already exists with different payload", 409);
+    return;
+  }
+  db.prepare("INSERT INTO diagnostics_batches(batch_id,payload_hash,metadata_json,records_json,created_at) VALUES(?,?,?,?,?)").run(id, hash, JSON.stringify(meta), JSON.stringify(records), Date.now());
+}
+async function saveFirebase(ref, id, hash, meta, records) {
+  if (!ref.parent || !ref.key) throw new Error("Firebase license reference must have parent and key");
+  const store = ref.parent.child(ref.key + "_diagnostics");
+  let conflict2 = false;
+  const result = await store.child(id).transaction((current) => {
+    if (current == null) return { payloadHash: hash, metadataJson: JSON.stringify(meta), recordsJson: JSON.stringify(records), createdAt: Date.now() };
+    if (!isObject(current) || current.payloadHash !== hash) conflict2 = true;
+    return current;
+  });
+  if (conflict2 || !result.committed) fail("batch id already exists with different payload", 409);
+}
+function mountDiagnostics(app, options) {
+  if (!options.firebase && !options.sqlite || options.firebase && options.sqlite) throw new Error("Provide exactly one diagnostics store");
+  const receiveLogs = options.receiveLogs ?? (process.env.DIAGNOSTICS_RECEIVE_LOGS ?? "true").toLowerCase() !== "false";
+  const limits = /* @__PURE__ */ new Map();
+  const allowed = () => receiveLogs;
+  app.get("/api/diagnostics", (_req, res) => res.status(200).json({ receiveLogs: allowed() }));
+  app.post("/api/diagnostics", async (req, res, next) => {
+    try {
+      if (!allowed()) return res.status(403).json({ error: "diagnostics uploads are disabled" });
+      const ip = req.ip || req.socket.remoteAddress || "unknown";
+      const now = Date.now();
+      const prior = limits.get(ip);
+      if (!prior || prior.reset <= now) {
+        if (limits.size > 1024) limits.delete(limits.keys().next().value);
+        limits.set(ip, { count: 1, reset: now + 6e4 });
+      } else if (++prior.count > 30) return res.status(429).json({ error: "rate limit exceeded" });
+      if (!CONTENT_TYPE.test(String(req.headers["content-type"] || ""))) return res.status(415).json({ error: "Content-Type must be application/x-ndjson" });
+      const { meta, records } = parseBody(await readBody(req));
+      const hash = payloadHash(meta, records);
+      if (options.sqlite) await saveSqlite(options.sqlite, meta.id, hash, meta, records);
+      else await saveFirebase(options.firebase, meta.id, hash, meta, records);
+      return res.status(200).json({ id: meta.id, accepted: meta.failures.map((f) => f.id).slice(0, 256) });
+    } catch (e) {
+      const status = Number(e?.status) || 500;
+      if (status >= 500) return next(e);
+      return res.status(status).json({ error: e.message });
+    }
+  });
+}
+
 // server.ts
 var __dirname = path2.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path2.join(__dirname, ".env"), quiet: true });
@@ -94,8 +258,8 @@ var sqlite = null;
 var rtdb = null;
 var revision = 0;
 var dbData = { admin: { username: "", password_hash: "" }, resellers: [], prices: [], keys: [], sessions: [], balance_logs: [] };
-var PRODUCTS = [{ id: "samurai-engine", name: "Samurai Engine" }, { id: "aim-cheto", name: "AIM CHETO" }];
-var PRODUCT_NAMES = { "samurai-engine": "Samurai Engine", "aim-cheto": "AIM CHETO" };
+var PRODUCTS = [{ id: "samurai-engine", name: "Samurai Engine" }, { id: "aim-cheto", name: "AIM CHETO" }, { id: "kuro", name: "KURO" }];
+var PRODUCT_NAMES = { "samurai-engine": "Samurai Engine", "aim-cheto": "AIM CHETO", "kuro": "KURO" };
 var isProductId = (v) => PRODUCTS.some((p) => p.id === v);
 var defaults = () => ({ admin: { username: "", password_hash: "" }, resellers: [], prices: [{ duration_days: 1, price: 5 }, { duration_days: 3, price: 12 }, { duration_days: 7, price: 25 }, { duration_days: 30, price: 80 }, { duration_days: 365, price: 500 }], keys: [], sessions: [], balance_logs: [] });
 function productIdOf(value) {
@@ -226,6 +390,7 @@ async function startServer() {
   await loadDb();
   const app = express();
   app.set("trust proxy", 1);
+  mountDiagnostics(app, rtdb ? { firebase: rtdb } : { sqlite });
   app.use(express.json({ limit: "32kb" }));
   for (const method of ["get", "post", "delete", "put", "patch"]) {
     const original = app[method].bind(app);

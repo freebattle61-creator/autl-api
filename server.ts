@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
 import { initializeFirebaseStore, firebaseOperation } from './firebase-store';
+import { mountDiagnostics } from './diagnostics';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Deliberately do not read a source workspace .env; deployment must provide env directly.
@@ -22,9 +23,9 @@ let sqlite: DatabaseSync | null = null;
 let rtdb: ReturnType<typeof initializeFirebaseStore> | null = null;
 let revision = 0;
 let dbData: DbSchema = { admin:{username:'',password_hash:''},resellers:[],prices:[],keys:[],sessions:[],balance_logs:[] };
-const PRODUCTS = [{id:'samurai-engine',name:'Samurai Engine'},{id:'aim-cheto',name:'AIM CHETO'}] as const;
+const PRODUCTS = [{id:'samurai-engine',name:'Samurai Engine'},{id:'aim-cheto',name:'AIM CHETO'},{id:'kuro',name:'KURO'}] as const;
 type ProductId = typeof PRODUCTS[number]['id'];
-const PRODUCT_NAMES: Record<ProductId,string> = {'samurai-engine':'Samurai Engine','aim-cheto':'AIM CHETO'};
+const PRODUCT_NAMES: Record<ProductId,string> = {'samurai-engine':'Samurai Engine','aim-cheto':'AIM CHETO','kuro':'KURO'};
 const isProductId = (v:any): v is ProductId => PRODUCTS.some(p => p.id === v);
 const defaults = (): DbSchema => ({ admin:{username:'',password_hash:''},resellers:[],prices:[{duration_days:1,price:5},{duration_days:3,price:12},{duration_days:7,price:25},{duration_days:30,price:80},{duration_days:365,price:500}],keys:[],sessions:[],balance_logs:[] });
 function productIdOf(value:any): ProductId { if (value === undefined || value === null || value === '') return 'samurai-engine'; if (isProductId(value)) return value; throw Object.assign(new Error('Unknown product_id'),{status:400,code:1001}); }
@@ -57,6 +58,8 @@ async function startServer() {
 
   const app = express();
   app.set('trust proxy', 1);
+  // Diagnostics bypass license-state serialization and use a separate durable namespace/table.
+  mountDiagnostics(app, rtdb ? { firebase: rtdb } : { sqlite: sqlite! });
   app.use(express.json({limit:'32kb'}));
   // Express 4 does not await async handlers: wrap registrations so rejected writes reach the error handler.
   for (const method of ['get','post','delete','put','patch'] as const) { const original=(app as any)[method].bind(app); (app as any)[method]=(route:string,...handlers:any[])=>original(route,...handlers.map((h:any)=>(req:any,res:any,next:any)=>{req._activeHandlers=(req._activeHandlers||0)+1; return Promise.resolve().then(()=>h(req,res,next)).catch(next).finally(()=>{req._activeHandlers--;req._releaseRequest?.();});})); }
