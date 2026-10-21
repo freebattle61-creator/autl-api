@@ -497,6 +497,7 @@ async function startServer() {
         error_code: 0,
         message: 'License validated successfully',
         session_id: sessionId,
+        expires: kRow.expires_at,
         expires_at: kRow.expires_at, plan: `${kRow.duration_days} Days`, product_id:keyProduct, product_name:PRODUCT_NAMES[keyProduct], session_expires_at: sessionExpires,
         heartbeat_interval: 60,
         user: {
@@ -532,6 +533,7 @@ async function startServer() {
       error_code: 0,
       message: 'License activated successfully',
       session_id: sessionId,
+      expires: expiresAt,
       expires_at: expiresAt, plan: `${kRow.duration_days} Days`, product_id:keyProduct, product_name:PRODUCT_NAMES[keyProduct], session_expires_at: sessionExpires,
       heartbeat_interval: 60,
       user: {
