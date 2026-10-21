@@ -38,6 +38,58 @@ interface Reseller {
 interface Product { id: string; name: string; }
 interface PriceItem { product_id?: string; duration_days: number; price: number; }
 
+const FALLBACK_PRODUCTS: Product[] = [
+  { id: 'samurai-engine', name: 'Samurai Engine' },
+  { id: 'aim-cheto', name: 'AIM CHETO' },
+  { id: 'kuro', name: 'KURO' },
+];
+
+const productAccent = (id: string) => id === 'samurai-engine' ? 'samurai' : id === 'aim-cheto' ? 'cheto' : id === 'kuro' ? 'kuro' : 'default';
+
+function ProductSelector({
+  products,
+  value,
+  onChange,
+  label,
+  allOption = false,
+  durationCount,
+}: {
+  products: Product[];
+  value: string;
+  onChange: (id: string) => void;
+  label: string;
+  allOption?: boolean;
+  durationCount?: Record<string, number>;
+}) {
+  const options = allOption ? [{ id: 'all', name: 'All products' }, ...products] : products;
+  return (
+    <div className="product-selector" role="group" aria-label={label}>
+      {options.map(product => {
+        const selected = value === product.id;
+        const accent = product.id === 'all' ? 'all' : productAccent(product.id);
+        const count = durationCount?.[product.id];
+        return (
+          <button
+            key={product.id}
+            type="button"
+            className={`product-option product-option-${accent} ${selected ? 'is-selected' : ''}`}
+            aria-label={product.name}
+            aria-pressed={selected}
+            onClick={() => onChange(product.id)}
+          >
+            <span className="product-option-mark" aria-hidden="true">{product.id === 'all' ? '✦' : product.id === 'kuro' ? 'K' : product.id === 'aim-cheto' ? 'A' : 'S'}</span>
+            <span className="product-option-copy">
+              <span className="product-option-name">{product.name}</span>
+              {typeof count === 'number' && <span className="product-option-meta">{count} configured duration{count === 1 ? '' : 's'}</span>}
+            </span>
+            <span className="product-option-check" aria-hidden="true">{selected ? '✓' : ''}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 interface BalanceLog {
   id: number;
   reseller_id: number;
@@ -101,10 +153,15 @@ export default function App() {
   // Prices state editor
   const [pricesEdit, setPricesEdit] = useState<Record<string, number>>({});
   const [pricingProduct, setPricingProduct] = useState('samurai-engine');
-  const [products, setProducts] = useState<Product[]>([{id:'samurai-engine',name:'Samurai Engine'},{id:'aim-cheto',name:'AIM CHETO'}]);
+  const [products, setProducts] = useState<Product[]>(FALLBACK_PRODUCTS);
   const [newPriceDays, setNewPriceDays] = useState('');
 
   const productName = (id: string) => products.find(p => p.id === id)?.name || id;
+  const withFallbackProducts = (incoming?: Product[]) => {
+    const source = Array.isArray(incoming) && incoming.length ? incoming : FALLBACK_PRODUCTS;
+    return FALLBACK_PRODUCTS.map(fallback => source.find(product => product.id === fallback.id) || fallback)
+      .concat(source.filter(product => !FALLBACK_PRODUCTS.some(fallback => fallback.id === product.id)));
+  };
   const pricesFor = (prices: PriceItem[], productId: string) => prices.filter(p => (p.product_id || 'samurai-engine') === productId).sort((a, b) => a.duration_days - b.duration_days);
   const adminProductPrices = adminData ? pricesFor(adminData.prices, genProduct) : [];
   const visibleAdminKeys = adminData ? adminData.keys.filter(k => keyProductFilter === 'all' || (k.product_id || 'samurai-engine') === keyProductFilter) : [];
@@ -148,12 +205,12 @@ export default function App() {
       if (data.success) {
         if (role === 'admin') {
           setAdminData(data);
-          if (Array.isArray(data.products) && data.products.length) setProducts(data.products);
+          if (Array.isArray(data.products) && data.products.length) setProducts(withFallbackProducts(data.products));
           const pMap: Record<string, number> = {};
           data.prices.forEach((p: PriceItem) => pMap[`${p.product_id || 'samurai-engine'}:${p.duration_days}`] = p.price);
           setPricesEdit(pMap);
         } else {
-          if (Array.isArray(data.products) && data.products.length) setProducts(data.products);
+          if (Array.isArray(data.products) && data.products.length) setProducts(withFallbackProducts(data.products));
           setResellerData(data);
         }
       } else {
@@ -665,11 +722,9 @@ export default function App() {
                     <span>License Key Database</span>
                   </h2>
 
-                  <label className="text-xs text-slate-400 flex items-center gap-2">Filter product
-                    <select aria-label="Filter keys by product" value={keyProductFilter} onChange={e => setKeyProductFilter(e.target.value)} className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">
-                      <option value="all">All products</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
-                  </label>
+                  <div className="w-full sm:max-w-2xl"><span className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2">Filter product</span>
+                    <ProductSelector label="Filter keys by product" products={products} value={keyProductFilter} onChange={setKeyProductFilter} allOption />
+                  </div>
 
                   {/* Comprehensive Bulk Actions Toolbar when keys are selected */}
                   {selectedKeyIds.length > 0 && (
@@ -815,9 +870,7 @@ export default function App() {
                 <form onSubmit={adminGenerateKeys} className="space-y-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Product</label>
-                    <select aria-label="Product for admin key generation" value={genProduct} onChange={e => setGenProduct(e.target.value)} className="w-full px-4 py-3.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm">
-                      {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
+                    <ProductSelector label="Product for admin key generation" products={products} value={genProduct} onChange={setGenProduct} durationCount={Object.fromEntries(products.map(p => [p.id, pricesFor(adminData?.prices || [], p.id).length]))} />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Duration (Days)</label>
@@ -992,9 +1045,9 @@ export default function App() {
                 </h2>
                 <p className="text-xs text-slate-400 mb-6">Set the exact balance amount deducted from resellers per key generation for each duration.</p>
                 <form onSubmit={savePrices} className="space-y-4">
-                  <label className="block text-xs font-semibold text-slate-400 uppercase">Product
-                    <select aria-label="Product for pricing" value={pricingProduct} onChange={e => setPricingProduct(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-                  </label>
+                  <div className="block text-xs font-semibold text-slate-400 uppercase"><span>Product</span>
+                    <ProductSelector label="Product for pricing" products={products} value={pricingProduct} onChange={setPricingProduct} durationCount={Object.fromEntries(products.map(p => [p.id, pricesFor(adminData?.prices || [], p.id).length]))} />
+                  </div>
                   <div className="flex gap-2 items-end">
                     <label className="flex-1 block text-[11px] font-semibold text-slate-400 uppercase tracking-wider">New duration (days)<input aria-label="New duration in days" type="number" min="1" step="1" value={newPriceDays} onChange={e => setNewPriceDays(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white" placeholder="e.g. 14" /></label>
                     <button type="button" onClick={() => { const d = Number(newPriceDays); if (Number.isInteger(d) && d > 0) { const key = `${pricingProduct}:${d}`; if (Object.prototype.hasOwnProperty.call(pricesEdit, key)) { showToast('That duration already exists'); return; } setPricesEdit({...pricesEdit, [key]: 0}); setNewPriceDays(''); } else showToast('Enter a positive whole number of days'); }} className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold">Add row</button>
@@ -1084,7 +1137,7 @@ export default function App() {
 
                 <div className="bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 shadow-2xl">
                   <h2 className="text-base font-bold text-white mb-3">Key Duration Prices (Set by Admin)</h2>
-                  <label className="block text-xs text-slate-400 mb-3">Product<select aria-label="Product for reseller pricing" value={resGenProduct} onChange={e => setResGenProduct(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+                  <div className="mb-4"><span className="block text-xs text-slate-400 mb-2">Product</span><ProductSelector label="Product for reseller pricing" products={products} value={resGenProduct} onChange={setResGenProduct} durationCount={Object.fromEntries(products.map(p => [p.id, pricesFor(resellerData?.prices || [], p.id).length]))} /></div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     {resellerProductPrices.map(p => (
                       <div key={`${p.product_id || 'samurai-engine'}:${p.duration_days}`} className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-center">
@@ -1154,7 +1207,7 @@ export default function App() {
                 </p>
                 <form onSubmit={resellerGenerateKeys} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-400 uppercase mb-1.5">Product & Duration</label><select aria-label="Product for reseller key generation" value={resGenProduct} onChange={e => setResGenProduct(e.target.value)} className="w-full mb-2 px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase mb-1.5">Product & Duration</label><ProductSelector label="Product for reseller key generation" products={products} value={resGenProduct} onChange={setResGenProduct} durationCount={Object.fromEntries(products.map(p => [p.id, pricesFor(resellerData?.prices || [], p.id).length]))} />
                     <select 
                       value={resGenDuration} 
                       onChange={e => setResGenDuration(Number(e.target.value))}
@@ -1233,7 +1286,7 @@ export default function App() {
             {activeTab === 'pricing' && (
               <div className="max-w-xl mx-auto bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 shadow-2xl">
                 <h2 className="text-base font-bold text-white mb-4">Key Duration Pricing</h2>
-                <label className="block text-xs text-slate-400 mb-3">Product<select aria-label="Product for reseller pricing table" value={resGenProduct} onChange={e => setResGenProduct(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+                <div className="mb-4"><span className="block text-xs text-slate-400 mb-2">Product</span><ProductSelector label="Product for reseller pricing table" products={products} value={resGenProduct} onChange={setResGenProduct} durationCount={Object.fromEntries(products.map(p => [p.id, pricesFor(resellerData?.prices || [], p.id).length]))} /></div>
                 <div className="grid grid-cols-2 gap-3">
                   {resellerProductPrices.map(p => (
                     <div key={`${p.product_id || 'samurai-engine'}:${p.duration_days}`} className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-center">

@@ -2,7 +2,7 @@
 
 ## Product pricing and keys
 
-`samurai-engine` (**Samurai Engine**) remains the default existing product. Legacy keys and price rows without a product ID belong to it. `aim-cheto` (**AIM CHETO**) is separate and starts with no configured prices. An admin must explicitly add duration/price rows before generating its keys. No production prices have been chosen for the new product.
+`samurai-engine` (**Samurai Engine**) remains the default existing product. Legacy keys and price rows without a product ID belong to it. `aim-cheto` (**AIM CHETO**) and `kuro` (**KURO**) are separate products. Newly added products start with no configured prices; existing AIM CHETO prices remain unchanged. An admin must explicitly add duration/price rows before generating its keys. No production prices have been chosen for the new product.
 
 Admin and reseller generators select a product and show configured durations with prices. Admin pricing can add positive whole-day durations and increase or decrease nonnegative prices to two decimals. Keys show product, duration, price at issuance, and issuing admin/reseller username. Existing keys without a historical price show **Not recorded**, not today's price. Editing prices does not rewrite key price history. Reseller charging uses the selected product's configured price; historical balances and credentials are preserved.
 
