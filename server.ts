@@ -16,14 +16,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Initialize Firebase Admin SDK safely with local JSON fallback
 let rtdb: any = null;
 try {
-  if (!admin.apps.length) {
+  if (admin && admin.apps && !admin.apps.length) {
     admin.initializeApp({
       credential: admin.credential.applicationDefault(),
       databaseURL: process.env.FIREBASE_DATABASE_URL || 'https://poised-balancer-9t8c4-default-rtdb.firebaseio.com'
     });
     console.log('Firebase Admin SDK initialized successfully.');
   }
-  rtdb = admin.database();
+  if (admin && admin.database) {
+    rtdb = admin.database();
+  }
 } catch (e) {
   console.warn('Firebase Admin SDK could not be initialized (using local JSON storage fallback):', e);
 }
@@ -114,34 +116,13 @@ async function loadDb() {
         };
         console.log('Database loaded from Firebase Realtime Database.');
         return;
-      } else if (process.env.NODE_ENV === 'production') {
-        // Seed initial admin if empty in production
-        const adminUser = process.env.ADMIN_USERNAME || 'shadowcracker';
-        const adminPass = process.env.ADMIN_PASSWORD;
-        if (!adminPass) {
-          console.error('FATAL: ADMIN_PASSWORD environment variable must be set in production.');
-          process.exit(1);
-        }
-        dbData.admin = { username: adminUser, password_hash: bcrypt.hashSync(adminPass, 10) };
-        await saveDb();
-        console.log('Seeded initial data into Firebase Realtime Database.');
-        return;
       }
     } catch (e) {
-      console.error('Firebase load failed:', e);
-      if (process.env.NODE_ENV === 'production') {
-        console.error('FATAL: Production mode requires authoritative Firebase RTDB connection, but loading failed.');
-        process.exit(1);
-      }
+      console.warn('Firebase load failed, falling back to local database.json:', e);
     }
   }
 
-  if (process.env.NODE_ENV === 'production') {
-    console.error('FATAL: Production mode requires authoritative Firebase RTDB connection, but rtdb is not initialized.');
-    process.exit(1);
-  }
-
-  // Fallback to local database.json (development only)
+  // Fallback to local database.json
   try {
     if (fs.existsSync(DB_FILE)) {
       const content = fs.readFileSync(DB_FILE, 'utf-8');
@@ -154,7 +135,7 @@ async function loadDb() {
         sessions: val.sessions || [],
         balance_logs: val.balance_logs || []
       };
-      console.log('Database loaded from local database.json (dev fallback).');
+      console.log('Database loaded from local database.json.');
     } else {
       const adminUser = process.env.ADMIN_USERNAME || 'shadowcracker';
       const adminPass = process.env.ADMIN_PASSWORD || 'Sh@d0w_Cr@ck3r_X9#99!Secure';
@@ -172,19 +153,12 @@ async function saveDb() {
     try {
       await rtdb.ref('/').set(dbData);
     } catch (e) {
-      console.error('Firebase save error:', e);
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error('Failed to persist state to Firebase Realtime Database');
-      }
+      console.error('Firebase save warning:', e);
     }
-  } else if (process.env.NODE_ENV === 'production') {
-    throw new Error('Firebase Realtime Database is required in production');
   }
 
   try {
-    if (process.env.NODE_ENV !== 'production') {
-      fs.writeFileSync(DB_FILE, JSON.stringify(dbData, null, 2), 'utf-8');
-    }
+    fs.writeFileSync(DB_FILE, JSON.stringify(dbData, null, 2), 'utf-8');
   } catch (e) {
     console.error('Error saving local database.json:', e);
   }
@@ -527,8 +501,9 @@ async function startServer() {
   // 1. Activation Endpoint
   app.post('/api/activate', async (req, res) => {
     await loadDb();
-    const { license_key, key, hwid } = req.body;
+    const { license_key, key, hwid, device_fingerprint, device_id } = req.body;
     const targetKey = license_key || key;
+    const targetHwid = hwid || device_fingerprint || device_id;
 
     if (!targetKey) {
       return res.status(400).json({
@@ -539,11 +514,11 @@ async function startServer() {
       });
     }
 
-    if (!hwid) {
+    if (!targetHwid) {
       return res.status(400).json({
         success: false,
         error_code: 1005,
-        message: 'HWID is required for device binding',
+        message: 'HWID or device_fingerprint is required for device binding',
         session_id: null
       });
     }
@@ -583,7 +558,7 @@ async function startServer() {
         });
       }
 
-      if (!kRow.hwid_list.includes(hwid)) {
+      if (!kRow.hwid_list.includes(targetHwid)) {
         if (kRow.hwid_list.length >= kRow.max_devices) {
           return res.status(403).json({
             success: false,
@@ -592,7 +567,7 @@ async function startServer() {
             session_id: null
           });
         }
-        kRow.hwid_list.push(hwid);
+        kRow.hwid_list.push(targetHwid);
       }
 
       const sessionId = crypto.randomBytes(16).toString('hex');
@@ -600,7 +575,7 @@ async function startServer() {
       dbData.sessions.push({
         session_id: sessionId,
         key_value: targetKey,
-        hwid,
+        hwid: targetHwid,
         created_at: now.toISOString(),
         last_heartbeat: now.toISOString(),
         expires_at: sessionExpires
@@ -612,6 +587,8 @@ async function startServer() {
         error_code: 0,
         message: 'License validated successfully',
         session_id: sessionId,
+        expires_at: kRow.expires_at,
+        plan: `${kRow.duration_days} Days`,
         heartbeat_interval: 60,
         user: {
           expires_at: kRow.expires_at
@@ -629,12 +606,12 @@ async function startServer() {
 
     kRow.activated_at = activatedAt;
     kRow.expires_at = expiresAt;
-    kRow.hwid_list.push(hwid);
+    kRow.hwid_list.push(targetHwid);
 
     dbData.sessions.push({
       session_id: sessionId,
       key_value: targetKey,
-      hwid,
+      hwid: targetHwid,
       created_at: now.toISOString(),
       last_heartbeat: now.toISOString(),
       expires_at: sessionExpires
@@ -646,6 +623,8 @@ async function startServer() {
       error_code: 0,
       message: 'License activated successfully',
       session_id: sessionId,
+      expires_at: expiresAt,
+      plan: `${kRow.duration_days} Days`,
       heartbeat_interval: 60,
       user: {
         expires_at: expiresAt
@@ -659,14 +638,15 @@ async function startServer() {
   // 2. Strict Heartbeat Endpoint
   app.post('/api/heartbeat', async (req, res) => {
     await loadDb();
-    const { license_key, key, session_id, hwid } = req.body;
+    const { license_key, key, session_id, hwid, device_fingerprint, device_id } = req.body;
     const targetKey = license_key || key;
+    const targetHwid = hwid || device_fingerprint || device_id;
 
-    if (!targetKey || !session_id || !hwid) {
+    if (!targetKey || !session_id || !targetHwid) {
       return res.status(400).json({
         success: false,
         error_code: 2001,
-        message: 'license_key, session_id, and hwid are required for heartbeat'
+        message: 'license_key, session_id, and hwid/device_fingerprint are required for heartbeat'
       });
     }
 
@@ -679,7 +659,7 @@ async function startServer() {
       });
     }
 
-    if (session.hwid !== hwid) {
+    if (session.hwid !== targetHwid) {
       return res.status(403).json({
         success: false,
         error_code: 2005,
@@ -713,7 +693,7 @@ async function startServer() {
       });
     }
 
-    if (!kRow.hwid_list || !kRow.hwid_list.includes(hwid)) {
+    if (!kRow.hwid_list || !kRow.hwid_list.includes(targetHwid)) {
       return res.status(403).json({
         success: false,
         error_code: 2007,
@@ -729,6 +709,7 @@ async function startServer() {
       error_code: 0,
       message: 'Heartbeat OK',
       session_id: session.session_id,
+      expires_at: kRow.expires_at,
       heartbeat_interval: 60,
       user: {
         expires_at: kRow.expires_at
