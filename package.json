@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "test:startup": "tsx startup.test.ts",
     "test:firebase-safety": "tsx firebase-safety.test.ts",
-    "test:maintenance": "tsx maintenance.test.ts"
+    "test:maintenance": "tsx maintenance.test.ts",
+    "test:products": "tsx products.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

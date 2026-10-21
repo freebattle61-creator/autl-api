@@ -1,0 +1,55 @@
+
+> react-example@0.0.0 lint
+> tsc --noEmit
+
+
+> react-example@0.0.0 build
+> vite build && esbuild server.ts --platform=node --format=esm --packages=external --bundle --outfile=server.js
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - `__dirname` (vite.config.ts:11:27). Use `import.meta.dirname` instead
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+vite v8.3.4 building client environment for production...
+transforming...
+✓ 1660 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   1.07 kB │ gzip:  0.51 kB
+dist/assets/index-BGFd64jP.css   40.62 kB │ gzip:  7.18 kB
+dist/assets/index-Dkv2bhmP.js   276.29 kB │ gzip: 79.35 kB
+
+✓ built in 321ms
+
+  server.js  36.1kb
+
+⚡ Done in 5ms
+
+> react-example@0.0.0 test
+> tsx test.ts
+
+HTTP regression tests passed: health, admin generation, aliases, activation, heartbeat, invalid/conflict, max devices, reset/revocation, expiry fixture, restart persistence
+
+> react-example@0.0.0 test:products
+> tsx products.test.ts
+
+Product integration passed: legacy preservation, isolated pricing, decimals/zero price, authorization, issuance history, exact balances, activation/heartbeat, restart.
+
+> react-example@0.0.0 test:startup
+> tsx startup.test.ts
+
+Startup checks passed: missing admin fails closed, invalid Firebase URL rejected, incompatible SQLite data preserved.
+
+> react-example@0.0.0 test:firebase-safety
+> tsx firebase-safety.test.ts
+
+Firebase safety checks passed: no transaction replay, configuration isolation, preserved-source namespace guards.
+
+> react-example@0.0.0 test:maintenance
+> tsx maintenance.test.ts
+
+Maintenance checks passed: ready without database, all API writes denied, no SQLite file created.
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.003s
+
+OK

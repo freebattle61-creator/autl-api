@@ -19,6 +19,11 @@ interface KeyItem {
   activated_at?: string;
   expires_at?: string;
   note?: string;
+  product_id?: string;
+  product_name?: string;
+  price_at_issue?: number | null;
+  issuer_role?: 'admin' | 'reseller';
+  issuer_username?: string;
 }
 
 interface Reseller {
@@ -30,10 +35,8 @@ interface Reseller {
   note?: string;
 }
 
-interface PriceItem {
-  duration_days: number;
-  price: number;
-}
+interface Product { id: string; name: string; }
+interface PriceItem { product_id?: string; duration_days: number; price: number; }
 
 interface BalanceLog {
   id: number;
@@ -68,6 +71,7 @@ export default function App() {
     reseller: Reseller;
     keys: KeyItem[];
     prices: PriceItem[];
+    products?: Product[];
     logs: BalanceLog[];
   } | null>(null);
 
@@ -76,8 +80,10 @@ export default function App() {
 
   // Key Selection for Bulk Actions
   const [selectedKeyIds, setSelectedKeyIds] = useState<number[]>([]);
+  const [keyProductFilter, setKeyProductFilter] = useState('all');
 
   // Key Generation Form
+  const [genProduct, setGenProduct] = useState('samurai-engine');
   const [genDuration, setGenDuration] = useState(7);
   const [genCount, setGenCount] = useState(10);
   const [genMaxDevices, setGenMaxDevices] = useState(1);
@@ -93,12 +99,26 @@ export default function App() {
   const [newResellerNote, setNewResellerNote] = useState('');
 
   // Prices state editor
-  const [pricesEdit, setPricesEdit] = useState<Record<number, number>>({});
+  const [pricesEdit, setPricesEdit] = useState<Record<string, number>>({});
+  const [pricingProduct, setPricingProduct] = useState('samurai-engine');
+  const [products, setProducts] = useState<Product[]>([{id:'samurai-engine',name:'Samurai Engine'},{id:'aim-cheto',name:'AIM CHETO'}]);
+  const [newPriceDays, setNewPriceDays] = useState('');
+
+  const productName = (id: string) => products.find(p => p.id === id)?.name || id;
+  const pricesFor = (prices: PriceItem[], productId: string) => prices.filter(p => (p.product_id || 'samurai-engine') === productId).sort((a, b) => a.duration_days - b.duration_days);
+  const adminProductPrices = adminData ? pricesFor(adminData.prices, genProduct) : [];
+  const visibleAdminKeys = adminData ? adminData.keys.filter(k => keyProductFilter === 'all' || (k.product_id || 'samurai-engine') === keyProductFilter) : [];
+  const selectedVisibleKeyIds = selectedKeyIds.filter(id => visibleAdminKeys.some(k => k.id === id));
+  const adminGenerationReady = adminProductPrices.some(p => p.duration_days === genDuration);
 
   // Reseller generator
+  const [resGenProduct, setResGenProduct] = useState('samurai-engine');
   const [resGenDuration, setResGenDuration] = useState(1);
   const [resGenCount, setResGenCount] = useState(5);
   const [resGenMaxDevices, setResGenMaxDevices] = useState(1);
+  const resellerProductPrices = resellerData ? pricesFor(resellerData.prices, resGenProduct) : [];
+  const generationPrice = resellerProductPrices.find(p => p.duration_days === resGenDuration)?.price;
+  const resellerGenerationReady = generationPrice !== undefined;
 
   // API Tester state
   const [testKey, setTestKey] = useState('');
@@ -128,10 +148,12 @@ export default function App() {
       if (data.success) {
         if (role === 'admin') {
           setAdminData(data);
-          const pMap: Record<number, number> = {};
-          data.prices.forEach((p: PriceItem) => pMap[p.duration_days] = p.price);
+          if (Array.isArray(data.products) && data.products.length) setProducts(data.products);
+          const pMap: Record<string, number> = {};
+          data.prices.forEach((p: PriceItem) => pMap[`${p.product_id || 'samurai-engine'}:${p.duration_days}`] = p.price);
           setPricesEdit(pMap);
         } else {
+          if (Array.isArray(data.products) && data.products.length) setProducts(data.products);
           setResellerData(data);
         }
       } else {
@@ -141,6 +163,18 @@ export default function App() {
       console.error(err);
     }
   };
+
+  useEffect(() => {
+    if (adminProductPrices.length && !adminProductPrices.some(p => p.duration_days === genDuration)) setGenDuration(adminProductPrices[0].duration_days);
+  }, [genProduct, adminData?.prices]);
+
+  useEffect(() => {
+    if (resellerProductPrices.length && !resellerProductPrices.some(p => p.duration_days === resGenDuration)) setResGenDuration(resellerProductPrices[0].duration_days);
+  }, [resGenProduct, resellerData?.prices]);
+
+  useEffect(() => {
+    setSelectedKeyIds(ids => ids.filter(id => visibleAdminKeys.some(k => k.id === id)));
+  }, [keyProductFilter, adminData?.keys]);
 
   useEffect(() => {
     if (token) {
@@ -192,11 +226,12 @@ export default function App() {
   // Admin Generate Keys
   const adminGenerateKeys = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!adminGenerationReady) { showToast('Configure a price for this product and duration first'); return; }
     try {
       const res = await fetch('/api/admin/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ duration: genDuration, count: genCount, max_devices: genMaxDevices, note: genNote })
+        body: JSON.stringify({ product_id: genProduct, duration: genDuration, count: genCount, max_devices: genMaxDevices, note: genNote })
       });
       const data = await res.json();
       if (data.success) {
@@ -223,7 +258,7 @@ export default function App() {
       const res = await fetch('/api/admin/prices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ prices: pricesEdit })
+        body: JSON.stringify({ product_id: pricingProduct, prices: Object.fromEntries(Object.entries(pricesEdit).filter(([k]) => k.startsWith(`${pricingProduct}:`)).map(([k,v]) => [k.split(':')[1], Math.max(0, Number(v.toFixed ? v.toFixed(2) : v))])) })
       });
       const data = await res.json();
       if (data.success) {
@@ -408,11 +443,11 @@ export default function App() {
   };
 
   const toggleSelectAll = () => {
-    if (!adminData) return;
-    if (selectedKeyIds.length === adminData.keys.length) {
-      setSelectedKeyIds([]);
+    if (!adminData || visibleAdminKeys.length === 0) return;
+    if (visibleAdminKeys.every(k => selectedKeyIds.includes(k.id))) {
+      setSelectedKeyIds(selectedKeyIds.filter(id => !visibleAdminKeys.some(k => k.id === id)));
     } else {
-      setSelectedKeyIds(adminData.keys.map(k => k.id));
+      setSelectedKeyIds(Array.from(new Set([...selectedKeyIds, ...visibleAdminKeys.map(k => k.id)])));
     }
   };
 
@@ -427,11 +462,13 @@ export default function App() {
   // Reseller Generate Keys
   const resellerGenerateKeys = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!resellerGenerationReady) { showToast('This product and duration are not available'); return; }
+    if (generationPrice !== undefined && generationPrice * resGenCount > resellerData!.reseller.balance) { showToast('Insufficient balance'); return; }
     try {
       const res = await fetch('/api/reseller/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ duration: resGenDuration, count: resGenCount, max_devices: resGenMaxDevices })
+        body: JSON.stringify({ product_id: resGenProduct, duration: resGenDuration, count: resGenCount, max_devices: resGenMaxDevices })
       });
       const data = await res.json();
       if (data.success) {
@@ -458,7 +495,7 @@ export default function App() {
       const res = await fetch('/api/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: testKey, hwid: testHwid })
+        body: JSON.stringify({ license_key: testKey, hwid: testHwid })
       });
       const data = await res.json();
       setTestResult(data);
@@ -628,6 +665,12 @@ export default function App() {
                     <span>License Key Database</span>
                   </h2>
 
+                  <label className="text-xs text-slate-400 flex items-center gap-2">Filter product
+                    <select aria-label="Filter keys by product" value={keyProductFilter} onChange={e => setKeyProductFilter(e.target.value)} className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">
+                      <option value="all">All products</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </label>
+
                   {/* Comprehensive Bulk Actions Toolbar when keys are selected */}
                   {selectedKeyIds.length > 0 && (
                     <div className="flex flex-wrap items-center gap-2 bg-slate-950 p-2 border border-purple-500/40 rounded-2xl shadow-xl animate-in fade-in duration-200">
@@ -672,7 +715,7 @@ export default function App() {
                       <tr className="border-b border-slate-800 text-slate-400 text-[11px] uppercase tracking-wider">
                         <th className="py-3 px-3 w-10">
                           <button onClick={toggleSelectAll} className="text-white hover:text-purple-400 transition" title="Select All">
-                            {adminData.keys.length > 0 && selectedKeyIds.length === adminData.keys.length ? (
+                            {adminData.keys.length > 0 && visibleAdminKeys.length > 0 && visibleAdminKeys.every(k => selectedKeyIds.includes(k.id)) ? (
                               <CheckSquare className="w-4 h-4 text-purple-400" />
                             ) : (
                               <Square className="w-4 h-4 text-slate-400" />
@@ -680,14 +723,14 @@ export default function App() {
                           </button>
                         </th>
                         <th className="py-3 px-3">License Key</th>
-                        <th className="py-3 px-3">Duration</th>
+                        <th className="py-3 px-3">Product</th><th className="py-3 px-3">Duration</th><th className="py-3 px-3">Price at issue</th><th className="py-3 px-3">Issued by</th>
                         <th className="py-3 px-3">Devices (HWID)</th>
                         <th className="py-3 px-3">Status</th>
                         <th className="py-3 px-3 text-right">Actions (Delete / Reset / Disable)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
-                      {adminData.keys.map(k => {
+                      {visibleAdminKeys.map(k => {
                         const isSelected = selectedKeyIds.includes(k.id);
                         return (
                           <tr key={k.id} className={`hover:bg-slate-800/40 transition ${k.is_disabled ? 'opacity-60 bg-red-950/10' : ''}`}>
@@ -706,7 +749,7 @@ export default function App() {
                                 <Copy className="w-3.5 h-3.5" />
                               </button>
                             </td>
-                            <td className="py-3 px-3">{k.duration_days}d</td>
+                            <td className="py-3 px-3 text-cyan-300">{k.product_name || products.find(p => p.id === (k.product_id || 'samurai-engine'))?.name || 'Samurai Engine'}</td><td className="py-3 px-3">{k.duration_days}d</td><td className="py-3 px-3">{typeof k.price_at_issue === 'number' ? `$${k.price_at_issue.toFixed(2)}` : 'Not recorded'}</td><td className="py-3 px-3">{k.issuer_role || (k.reseller_id ? 'reseller' : 'admin')} / {k.issuer_username || k.created_by || 'Unknown'}</td>
                             <td className="py-3 px-3 text-cyan-400 flex items-center gap-1.5">
                               <Smartphone className="w-3.5 h-3.5" />
                               <span>{k.hwid_list?.length || 0} / {k.max_devices}</span>
@@ -751,7 +794,7 @@ export default function App() {
                           </tr>
                         );
                       })}
-                      {adminData.keys.length === 0 && (
+                      {visibleAdminKeys.length === 0 && (
                         <tr>
                           <td colSpan={6} className="text-center py-12 text-slate-500 font-sans">No keys generated yet.</td>
                         </tr>
@@ -771,18 +814,17 @@ export default function App() {
                 </h2>
                 <form onSubmit={adminGenerateKeys} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Duration (Days)</label>
-                    <select 
-                      value={genDuration} 
-                      onChange={e => setGenDuration(Number(e.target.value))}
-                      className="w-full px-4 py-3.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:outline-none focus:border-purple-500 transition"
-                    >
-                      <option value={1}>1 Day</option>
-                      <option value={3}>3 Days</option>
-                      <option value={7}>7 Days</option>
-                      <option value={30}>30 Days (1 Month)</option>
-                      <option value={365}>365 Days (1 Year)</option>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Product</label>
+                    <select aria-label="Product for admin key generation" value={genProduct} onChange={e => setGenProduct(e.target.value)} className="w-full px-4 py-3.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm">
+                      {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Duration (Days)</label>
+                    <select aria-label="Duration for admin key generation" value={genDuration} onChange={e => setGenDuration(Number(e.target.value))} disabled={!adminProductPrices.length} className="w-full px-4 py-3.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm disabled:opacity-50">
+                      {adminProductPrices.map(p => <option key={p.duration_days} value={p.duration_days}>{p.duration_days} Day{p.duration_days === 1 ? '' : 's'} — ${p.price}</option>)}
+                    </select>
+                    {!adminProductPrices.length && <p className="text-xs text-amber-400 mt-2">No prices configured for {productName(genProduct)}.</p>}
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
@@ -823,6 +865,7 @@ export default function App() {
 
                   <button 
                     type="submit"
+                    disabled={!adminGenerationReady}
                     className="w-full py-4 bg-purple-600 hover:bg-purple-500 text-white font-semibold rounded-xl shadow-xl shadow-purple-600/30 transition text-sm mt-2"
                   >
                     Generate Keys
@@ -949,21 +992,20 @@ export default function App() {
                 </h2>
                 <p className="text-xs text-slate-400 mb-6">Set the exact balance amount deducted from resellers per key generation for each duration.</p>
                 <form onSubmit={savePrices} className="space-y-4">
-                  {adminData.prices.map(p => (
-                    <div key={p.duration_days} className="flex items-center justify-between p-3.5 bg-slate-950 border border-slate-800 rounded-xl">
-                      <span className="text-sm font-semibold text-slate-300">{p.duration_days} Day{p.duration_days > 1 ? 's' : ''} License</span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-500">$</span>
-                        <input 
-                          type="number" 
-                          step="0.01"
-                          value={pricesEdit[p.duration_days] ?? p.price} 
-                          onChange={e => setPricesEdit({...pricesEdit, [p.duration_days]: Number(e.target.value)})}
-                          className="w-28 px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-white font-mono text-sm text-right focus:outline-none focus:border-purple-500"
-                        />
-                      </div>
-                    </div>
-                  ))}
+                  <label className="block text-xs font-semibold text-slate-400 uppercase">Product
+                    <select aria-label="Product for pricing" value={pricingProduct} onChange={e => setPricingProduct(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+                  </label>
+                  <div className="flex gap-2 items-end">
+                    <label className="flex-1 block text-[11px] font-semibold text-slate-400 uppercase tracking-wider">New duration (days)<input aria-label="New duration in days" type="number" min="1" step="1" value={newPriceDays} onChange={e => setNewPriceDays(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white" placeholder="e.g. 14" /></label>
+                    <button type="button" onClick={() => { const d = Number(newPriceDays); if (Number.isInteger(d) && d > 0) { const key = `${pricingProduct}:${d}`; if (Object.prototype.hasOwnProperty.call(pricesEdit, key)) { showToast('That duration already exists'); return; } setPricesEdit({...pricesEdit, [key]: 0}); setNewPriceDays(''); } else showToast('Enter a positive whole number of days'); }} className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold">Add row</button>
+                  </div>
+                  {Object.entries(pricesEdit).filter(([key]) => key.startsWith(`${pricingProduct}:`)).sort(([a], [b]) => Number(a.split(':')[1]) - Number(b.split(':')[1])).map(([key, value]) => {
+                    const days = Number(key.split(':')[1]);
+                    return <div key={key} className="flex items-center justify-between p-3.5 bg-slate-950 border border-slate-800 rounded-xl">
+                      <span className="text-sm font-semibold text-slate-300">{days} Day{days > 1 ? 's' : ''} License</span><div className="flex items-center gap-2"><span className="text-xs text-slate-500">$</span><input aria-label={`${productName(pricingProduct)} ${days} day price`} type="number" min="0" step="0.01" value={value} onChange={e => setPricesEdit({...pricesEdit, [key]: Math.max(0, Number(e.target.value))})} className="w-28 px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-white font-mono text-sm text-right focus:outline-none focus:border-purple-500" /></div>
+                    </div>;
+                  })}
+                  {!Object.keys(pricesEdit).some(key => key.startsWith(`${pricingProduct}:`)) && <p className="text-xs text-amber-400">No prices configured for {productName(pricingProduct)}.</p>}
                   <button type="submit" className="w-full py-3.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-sm font-semibold shadow-lg shadow-purple-600/30 transition mt-2">
                     Save Pricing Table
                   </button>
@@ -1004,6 +1046,12 @@ export default function App() {
                       Test Activation Request
                     </button>
                   </form>
+                  <div className="mt-5 pt-4 border-t border-slate-800 text-xs text-slate-300 space-y-2">
+                    <h3 className="font-semibold text-white">API contract</h3>
+                    <p><code>POST /api/activate</code> body: <code>{`{ license_key, hwid }`}</code>; success: <code>{`{ success, session_id, expires }`}</code>.</p>
+                    <p><code>POST /api/heartbeat</code> body: <code>{`{ license_key, hwid, session_id }`}</code>.</p>
+                    <p>Errors use <code>{`{ success: false, message, error_code }`}</code>. No <code>features</code> or <code>session_valid</code> claim is part of the contract.</p>
+                  </div>
 
                   {testResult && (
                     <div className="mt-4 p-4 bg-slate-950 border border-slate-800 rounded-xl font-mono text-xs">
@@ -1036,9 +1084,10 @@ export default function App() {
 
                 <div className="bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 shadow-2xl">
                   <h2 className="text-base font-bold text-white mb-3">Key Duration Prices (Set by Admin)</h2>
+                  <label className="block text-xs text-slate-400 mb-3">Product<select aria-label="Product for reseller pricing" value={resGenProduct} onChange={e => setResGenProduct(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    {resellerData.prices.map(p => (
-                      <div key={p.duration_days} className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-center">
+                    {resellerProductPrices.map(p => (
+                      <div key={`${p.product_id || 'samurai-engine'}:${p.duration_days}`} className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-center">
                         <div className="text-xs text-slate-400">{p.duration_days} Day(s)</div>
                         <div className="text-base font-bold text-cyan-400 mt-1 font-mono">${p.price} / key</div>
                       </div>
@@ -1057,8 +1106,11 @@ export default function App() {
                     <thead>
                       <tr className="border-b border-slate-800 text-slate-400 text-[11px] uppercase tracking-wider">
                         <th className="py-3 px-3">License Key</th>
-                        <th className="py-3 px-3">Days</th>
-                        <th className="py-3 px-3">Devices</th>
+                        <th className="py-3 px-3">Product</th>
+                        <th className="py-3 px-3">Duration</th>
+                        <th className="py-3 px-3">Price at issue</th>
+                        <th className="py-3 px-3">Issued by</th>
+                        <th className="py-3 px-3">Devices (HWID)</th>
                         <th className="py-3 px-3">Status</th>
                       </tr>
                     </thead>
@@ -1071,7 +1123,7 @@ export default function App() {
                               <Copy className="w-3.5 h-3.5" />
                             </button>
                           </td>
-                          <td className="py-3 px-3">{k.duration_days}d</td>
+                          <td className="py-3 px-3 text-cyan-300">{k.product_name || products.find(p => p.id === (k.product_id || 'samurai-engine'))?.name || 'Samurai Engine'}</td><td className="py-3 px-3">{k.duration_days}d</td><td className="py-3 px-3">{typeof k.price_at_issue === 'number' ? `$${k.price_at_issue.toFixed(2)}` : 'Not recorded'}</td><td className="py-3 px-3">{k.issuer_role || (k.reseller_id ? 'reseller' : 'admin')} / {k.issuer_username || k.created_by || 'Unknown'}</td>
                           <td className="py-3 px-3 text-cyan-400">📱 {k.hwid_list?.length || 0} / {k.max_devices}</td>
                           <td className="py-3 px-3 font-sans">
                             {k.is_disabled ? (
@@ -1102,13 +1154,13 @@ export default function App() {
                 </p>
                 <form onSubmit={resellerGenerateKeys} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-400 uppercase mb-1.5">Select Duration & Price</label>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase mb-1.5">Product & Duration</label><select aria-label="Product for reseller key generation" value={resGenProduct} onChange={e => setResGenProduct(e.target.value)} className="w-full mb-2 px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
                     <select 
                       value={resGenDuration} 
                       onChange={e => setResGenDuration(Number(e.target.value))}
                       className="w-full px-4 py-3.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
                     >
-                      {resellerData.prices.map(p => (
+                      {resellerProductPrices.map(p => (
                         <option key={p.duration_days} value={p.duration_days}>
                           {p.duration_days} Day(s) — ${p.price} per key
                         </option>
@@ -1143,11 +1195,11 @@ export default function App() {
                   <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300 flex justify-between items-center font-mono">
                     <span>Estimated Total Cost:</span>
                     <span className="text-cyan-400 font-bold text-sm">
-                      ${((resellerData.prices.find(p => p.duration_days === resGenDuration)?.price || 0) * resGenCount).toFixed(2)}
+                      ${((generationPrice || 0) * resGenCount).toFixed(2)}
                     </span>
                   </div>
 
-                  <button type="submit" className="w-full py-4 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-sm font-semibold shadow-xl shadow-purple-600/30 transition">
+                  <button type="submit" disabled={!resellerGenerationReady || (generationPrice || 0) * resGenCount > resellerData.reseller.balance} className="w-full py-4 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-sm font-semibold shadow-xl shadow-purple-600/30 transition">
                     Generate Keys & Deduct Balance
                   </button>
                 </form>
@@ -1181,9 +1233,10 @@ export default function App() {
             {activeTab === 'pricing' && (
               <div className="max-w-xl mx-auto bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 shadow-2xl">
                 <h2 className="text-base font-bold text-white mb-4">Key Duration Pricing</h2>
+                <label className="block text-xs text-slate-400 mb-3">Product<select aria-label="Product for reseller pricing table" value={resGenProduct} onChange={e => setResGenProduct(e.target.value)} className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white">{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
                 <div className="grid grid-cols-2 gap-3">
-                  {resellerData.prices.map(p => (
-                    <div key={p.duration_days} className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-center">
+                  {resellerProductPrices.map(p => (
+                    <div key={`${p.product_id || 'samurai-engine'}:${p.duration_days}`} className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-center">
                       <div className="text-xs text-slate-400">{p.duration_days} Day(s)</div>
                       <div className="text-lg font-bold text-cyan-400 mt-1 font-mono">${p.price}</div>
                     </div>
@@ -1195,8 +1248,8 @@ export default function App() {
             {/* Tab 6: API */}
             {activeTab === 'api' && (
               <div className="max-w-xl mx-auto bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 shadow-2xl">
-                <h2 className="text-base font-bold text-white mb-2">API Integration Docs</h2>
-                <p className="text-xs text-slate-400">Use your generated keys with device limit in your native `.so` modules.</p>
+                <h2 className="text-base font-bold text-white mb-3">API Integration Docs</h2>
+                <div className="space-y-3 text-xs text-slate-300"><p><code>POST /api/activate</code> body: <code>{`{ license_key, hwid }`}</code>. Success returns <code>{`{ success, session_id, expires }`}</code>.</p><p><code>POST /api/heartbeat</code> body: <code>{`{ license_key, hwid, session_id }`}</code>.</p><p>Errors return <code>{`{ success: false, message, error_code }`}</code>. Do not rely on undocumented <code>features</code> or <code>session_valid</code> fields.</p></div>
               </div>
             )}
           </div>
