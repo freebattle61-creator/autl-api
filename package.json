@@ -13,6 +13,7 @@
     "test:firebase-safety": "tsx firebase-safety.test.ts",
     "test:maintenance": "tsx maintenance.test.ts",
     "test:products": "tsx products.test.ts",
+    "test:kuro-contract": "npm run build && tsx kuro-contract.test.ts",
     "test:diagnostics": "tsx diagnostics.test.ts"
   },
   "dependencies": {
