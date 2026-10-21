@@ -94,7 +94,25 @@ var sqlite = null;
 var rtdb = null;
 var revision = 0;
 var dbData = { admin: { username: "", password_hash: "" }, resellers: [], prices: [], keys: [], sessions: [], balance_logs: [] };
+var PRODUCTS = [{ id: "samurai-engine", name: "Samurai Engine" }, { id: "aim-cheto", name: "AIM CHETO" }];
+var PRODUCT_NAMES = { "samurai-engine": "Samurai Engine", "aim-cheto": "AIM CHETO" };
+var isProductId = (v) => PRODUCTS.some((p) => p.id === v);
 var defaults = () => ({ admin: { username: "", password_hash: "" }, resellers: [], prices: [{ duration_days: 1, price: 5 }, { duration_days: 3, price: 12 }, { duration_days: 7, price: 25 }, { duration_days: 30, price: 80 }, { duration_days: 365, price: 500 }], keys: [], sessions: [], balance_logs: [] });
+function productIdOf(value) {
+  if (value === void 0 || value === null || value === "") return "samurai-engine";
+  if (isProductId(value)) return value;
+  throw Object.assign(new Error("Unknown product_id"), { status: 400, code: 1001 });
+}
+function normalizedPrices() {
+  return dbData.prices.map((p) => ({ product_id: productIdOf(p.product_id), duration_days: p.duration_days, price: p.price }));
+}
+function priceFor(product_id, duration_days) {
+  return normalizedPrices().find((p) => p.product_id === product_id && p.duration_days === duration_days);
+}
+function publicKey(k) {
+  const product_id = productIdOf(k.product_id);
+  return { ...k, product_id, product_name: PRODUCT_NAMES[product_id], price_at_issue: typeof k.price_at_issue === "number" && Number.isFinite(k.price_at_issue) ? k.price_at_issue : null, issuer_role: k.issuer_role || (k.reseller_id === void 0 ? "admin" : "reseller"), issuer_username: k.issuer_username || k.created_by };
+}
 function validateState(v) {
   if (!v || typeof v !== "object" || !v.admin || typeof v.admin.username !== "string" || !v.admin.username || typeof v.admin.password_hash !== "string" || !v.admin.password_hash || !Array.isArray(v.resellers) || !Array.isArray(v.prices) || !Array.isArray(v.keys) || !Array.isArray(v.sessions) || !Array.isArray(v.balance_logs)) throw new Error("Configured database contains an incompatible nonempty schema; refusing overwrite.");
   return { admin: v.admin, resellers: v.resellers, prices: v.prices, keys: v.keys, sessions: v.sessions, balance_logs: v.balance_logs };
@@ -285,6 +303,10 @@ async function startServer() {
       if (!session) {
         return res.status(401).json({ success: false, message: "Unauthorized" });
       }
+      if (session.role === "reseller") {
+        const current = dbData.resellers.find((r) => r.id === session.reseller_id);
+        if (!current || !current.is_active) return res.status(403).json({ success: false, message: "Reseller account is disabled" });
+      }
       if (role && session.role !== role && session.role !== "admin") {
         return res.status(403).json({ success: false, message: "Forbidden" });
       }
@@ -302,9 +324,10 @@ async function startServer() {
     });
     res.json({
       success: true,
-      keys: [...dbData.keys].reverse().slice(0, 100),
+      products: PRODUCTS,
+      keys: [...dbData.keys].reverse().slice(0, 100).map(publicKey),
       resellers: dbData.resellers.map((r) => ({ id: r.id, username: r.username, balance: r.balance, is_active: r.is_active, created_at: r.created_at, note: r.note })),
-      prices: dbData.prices,
+      prices: normalizedPrices(),
       stats: {
         total,
         used,
@@ -315,8 +338,12 @@ async function startServer() {
     });
   });
   app.post("/api/admin/generate", requireAuth("admin"), async (req, res) => {
-    const { duration, count = 10, max_devices = 1, note = "" } = req.body;
-    const dur = parseInt(duration) || 1;
+    const { duration, duration_days, product_id: requestedProduct, count = 10, max_devices = 1, note = "" } = req.body;
+    const product_id = productIdOf(requestedProduct);
+    const dur = Number(duration_days ?? duration ?? 1);
+    if (!Number.isSafeInteger(dur) || dur <= 0) return res.status(400).json({ success: false, message: "Invalid duration" });
+    const selectedPrice = priceFor(product_id, dur);
+    if (!selectedPrice) return res.status(400).json({ success: false, message: "Unavailable product duration price" });
     const cnt = Math.max(1, Math.min(parseInt(count) || 1, 200));
     const maxDev = Math.max(1, parseInt(max_devices) || 1);
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -331,7 +358,11 @@ async function startServer() {
         is_disabled: 0,
         created_at: now,
         created_by: user,
-        note
+        note,
+        product_id,
+        price_at_issue: selectedPrice.price,
+        issuer_role: "admin",
+        issuer_username: user
       };
       dbData.keys.push(newKey);
     }
@@ -339,19 +370,20 @@ async function startServer() {
     res.json({ success: true, message: `Successfully generated ${cnt} keys` });
   });
   app.post("/api/admin/prices", requireAuth("admin"), async (req, res) => {
-    const pricesObj = req.body.prices;
-    if (!pricesObj) return res.status(400).json({ success: false, message: "Invalid prices" });
-    for (const [days, price] of Object.entries(pricesObj)) {
-      const d = parseInt(days);
-      const p = parseFloat(price) || 0;
-      const existing = dbData.prices.find((item) => item.duration_days === d);
+    const product_id = productIdOf(req.body?.product_id);
+    const pricesObj = req.body?.prices;
+    if (!pricesObj || typeof pricesObj !== "object" || Array.isArray(pricesObj)) return res.status(400).json({ success: false, message: "Invalid prices" });
+    for (const [days, raw] of Object.entries(pricesObj)) {
+      if (!/^\d+$/.test(days)) return res.status(400).json({ success: false, message: "Duration days must be positive integers" });
+      const d = Number(days), p = raw;
+      if (!Number.isSafeInteger(d) || d <= 0 || typeof raw !== "number" || !Number.isFinite(p) || p < 0 || !Number.isSafeInteger(Math.round(p * 100)) || Math.abs(Math.round(p * 100) - p * 100) > 1e-8) return res.status(400).json({ success: false, message: "Prices must be nonnegative finite monetary values with at most two decimals" });
+      const existing = dbData.prices.find((item) => productIdOf(item.product_id) === product_id && item.duration_days === d);
       if (existing) {
+        existing.product_id = product_id;
         existing.price = p;
-      } else {
-        dbData.prices.push({ duration_days: d, price: p });
-      }
+      } else dbData.prices.push({ product_id, duration_days: d, price: p });
     }
-    dbData.prices.sort((a, b) => a.duration_days - b.duration_days);
+    dbData.prices.sort((a, b) => productIdOf(a.product_id).localeCompare(productIdOf(b.product_id)) || a.duration_days - b.duration_days);
     await saveDb();
     res.json({ success: true, message: "Prices updated successfully" });
   });
@@ -483,24 +515,27 @@ async function startServer() {
     res.json({
       success: true,
       reseller: reseller ? { id: reseller.id, username: reseller.username, balance: reseller.balance, is_active: reseller.is_active } : null,
-      keys,
-      prices: dbData.prices,
+      products: PRODUCTS,
+      keys: keys.map(publicKey),
+      prices: normalizedPrices(),
       logs
     });
   });
   app.post("/api/reseller/generate", requireAuth("reseller"), async (req, res) => {
     const rid = req.user.reseller_id;
-    const duration = parseInt(req.body.duration) || 1;
+    const product_id = productIdOf(req.body?.product_id);
+    const duration = Number(req.body.duration_days ?? req.body.duration ?? 1);
+    if (!Number.isSafeInteger(duration) || duration <= 0) return res.status(400).json({ success: false, message: "Invalid duration" });
     const count = Math.max(1, Math.min(parseInt(req.body.count) || 1, 50));
     const maxDev = Math.max(1, parseInt(req.body.max_devices) || 1);
-    const priceRow = dbData.prices.find((p) => p.duration_days === duration);
-    if (!priceRow) return res.status(400).json({ success: false, message: "Invalid duration" });
-    const totalCost = priceRow.price * count;
+    const priceRow = priceFor(product_id, duration);
+    if (!priceRow) return res.status(400).json({ success: false, message: "Unavailable product duration price" });
+    const totalCost = Math.round(priceRow.price * 100) * count / 100;
     const reseller = dbData.resellers.find((r) => r.id === rid);
     if (!reseller || reseller.balance < totalCost) {
       return res.status(400).json({ success: false, message: `Insufficient balance. Need $${totalCost}, have $${reseller?.balance || 0}` });
     }
-    reseller.balance -= totalCost;
+    reseller.balance = Math.round((reseller.balance - totalCost) * 100) / 100;
     dbData.balance_logs.push({
       id: dbData.balance_logs.length > 0 ? Math.max(...dbData.balance_logs.map((l) => l.id)) + 1 : 1,
       reseller_id: rid,
@@ -519,7 +554,11 @@ async function startServer() {
         is_disabled: 0,
         created_at: now,
         created_by: reseller.username,
-        reseller_id: rid
+        reseller_id: rid,
+        product_id,
+        price_at_issue: priceRow.price,
+        issuer_role: "reseller",
+        issuer_username: reseller.username
       });
     }
     await saveDb();
@@ -529,6 +568,7 @@ async function startServer() {
     await loadDb();
     const targetKey = alias(req.body, "license_key", "key");
     const hwid = alias(req.body, "device_fingerprint", "hwid");
+    const requestedProduct = req.body?.product_id === void 0 ? void 0 : productIdOf(req.body.product_id);
     if (!targetKey) {
       return res.status(400).json({
         success: false,
@@ -554,6 +594,8 @@ async function startServer() {
         session_id: null
       });
     }
+    const keyProduct = productIdOf(kRow.product_id);
+    if (requestedProduct && requestedProduct !== keyProduct) return res.status(400).json({ success: false, error_code: 1001, message: "Product does not match license key", session_id: null });
     if (kRow.is_disabled) {
       return res.status(403).json({
         success: false,
@@ -607,6 +649,8 @@ async function startServer() {
         session_id: sessionId2,
         expires_at: kRow.expires_at,
         plan: `${kRow.duration_days} Days`,
+        product_id: keyProduct,
+        product_name: PRODUCT_NAMES[keyProduct],
         session_expires_at: sessionExpires2,
         heartbeat_interval: 60,
         user: {
@@ -640,6 +684,8 @@ async function startServer() {
       session_id: sessionId,
       expires_at: expiresAt,
       plan: `${kRow.duration_days} Days`,
+      product_id: keyProduct,
+      product_name: PRODUCT_NAMES[keyProduct],
       session_expires_at: sessionExpires,
       heartbeat_interval: 60,
       user: {

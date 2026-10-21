@@ -1,0 +1,6 @@
+[
+  {"path":"/api/health","request":null,"status":200,"response":{"success":true,"storage":"firebase","ready":true}},
+  {"path":"/api/activate","request":{"license_key":"CUE-CONTRACT-PROBE-NOT-A-LICENSE","hwid":"contract-probe"},"status":404,"response":{"success":false,"error_code":1002,"message":"Invalid license key","session_id":null}},
+  {"path":"/api/activate","request":{},"status":400,"response":{"success":false,"error_code":1001,"message":"license_key is required"}},
+  {"path":"/api/heartbeat","request":{"license_key":"CUE-CONTRACT-PROBE-NOT-A-LICENSE","hwid":"contract-probe","session_id":"invalid-contract-probe"},"status":401,"response":{"success":false,"error_code":2002,"message":"Invalid, revoked, or expired session ID"}}
+]
