@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getDatabase } from 'firebase-admin/database';
 
@@ -37,12 +38,19 @@ export function firebaseOptions(env: NodeJS.ProcessEnv = process.env, baseDir = 
 
 export function initializeFirebaseStore(env: NodeJS.ProcessEnv = process.env, baseDir = process.cwd()) {
   const options = firebaseOptions(env, baseDir);
-  const name = 'license-api';
+  const identity = JSON.stringify([options.databaseURL, options.databasePath, env.FIREBASE_SERVICE_ACCOUNT_JSON || '', env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '', env.GOOGLE_APPLICATION_CREDENTIALS || '']);
+  const name = 'license-api-' + crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24);
   const app = getApps().find(app => app.name === name) || initializeApp({ credential: options.credential, databaseURL: options.databaseURL }, name);
   return getDatabase(app).ref(options.databasePath);
 }
 
 export async function firebaseOperation<T>(operation: () => Promise<T>, label: string): Promise<T> {
+  // Only reads can be safely retried after an application timeout. Firebase SDK
+  // transactions already retry conflicts; never overlap them with a second write.
+  if (label !== 'read') {
+    try { return await operation(); }
+    catch { throw new Error(`Firebase ${label} failed. Check credentials, database URL, permissions and network connectivity.`); }
+  }
   for (let attempt = 1; attempt <= 3; attempt++) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

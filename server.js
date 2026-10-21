@@ -3,7 +3,7 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path2 from "path";
 import { fileURLToPath } from "url";
-import crypto from "crypto";
+import crypto2 from "crypto";
 import fs2 from "fs";
 import os from "os";
 import dotenv from "dotenv";
@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 // firebase-store.ts
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
 import { getDatabase } from "firebase-admin/database";
 function firebaseOptions(env = process.env, baseDir = process.cwd()) {
@@ -52,11 +53,19 @@ function firebaseOptions(env = process.env, baseDir = process.cwd()) {
 }
 function initializeFirebaseStore(env = process.env, baseDir = process.cwd()) {
   const options = firebaseOptions(env, baseDir);
-  const name = "license-api";
+  const identity = JSON.stringify([options.databaseURL, options.databasePath, env.FIREBASE_SERVICE_ACCOUNT_JSON || "", env.FIREBASE_SERVICE_ACCOUNT_BASE64 || "", env.GOOGLE_APPLICATION_CREDENTIALS || ""]);
+  const name = "license-api-" + crypto.createHash("sha256").update(identity).digest("hex").slice(0, 24);
   const app = getApps().find((app2) => app2.name === name) || initializeApp({ credential: options.credential, databaseURL: options.databaseURL }, name);
   return getDatabase(app).ref(options.databasePath);
 }
 async function firebaseOperation(operation, label) {
+  if (label !== "read") {
+    try {
+      return await operation();
+    } catch {
+      throw new Error(`Firebase ${label} failed. Check credentials, database URL, permissions and network connectivity.`);
+    }
+  }
   for (let attempt = 1; attempt <= 3; attempt++) {
     let timer;
     try {
@@ -98,6 +107,9 @@ async function initializeStorage() {
   process.umask(63);
   if (process.env.FIREBASE_DATABASE_URL) {
     rtdb = initializeFirebaseStore(process.env, __dirname);
+    rtdb.on("value", () => {
+    }, () => {
+    });
     return;
   }
   fs2.mkdirSync(path2.dirname(DB_FILE), { recursive: true, mode: 448 });
@@ -173,7 +185,7 @@ async function saveDb() {
   revision = expected + 1;
 }
 function generateKey() {
-  return `SH-${crypto.randomBytes(2).toString("hex").toUpperCase()}-${crypto.randomBytes(2).toString("hex").toUpperCase()}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+  return `SH-${crypto2.randomBytes(2).toString("hex").toUpperCase()}-${crypto2.randomBytes(2).toString("hex").toUpperCase()}-${crypto2.randomBytes(2).toString("hex").toUpperCase()}`;
 }
 function alias(body, a, b) {
   const x = body?.[a], y = body?.[b];
@@ -184,6 +196,14 @@ function alias(body, a, b) {
   return v.trim();
 }
 async function startServer() {
+  if (process.env.LICENSE_API_MAINTENANCE === "1") {
+    const maintenance = express();
+    maintenance.get("/api/health", (_req, res) => res.json({ success: true, storage: "maintenance", ready: true, maintenance: true }));
+    maintenance.use((_req, res) => res.status(503).set("Retry-After", "120").json({ success: false, message: "License API is temporarily in maintenance. Please retry shortly." }));
+    const maintenancePort = Number(process.env.PORT || 3e3);
+    maintenance.listen(maintenancePort, process.env.HOST || "127.0.0.1", () => console.log("Maintenance server ready; database is not connected."));
+    return;
+  }
   await initializeStorage();
   await loadDb();
   const app = express();
@@ -242,7 +262,7 @@ async function startServer() {
       return res.status(400).json({ success: false, message: "Username and password required" });
     }
     if (dbData.admin.username === username && await bcrypt.compare(password, dbData.admin.password_hash)) {
-      const token = crypto.randomBytes(16).toString("hex");
+      const token = crypto2.randomBytes(16).toString("hex");
       webSessions.set(token, { role: "admin", username: dbData.admin.username });
       return res.json({ success: true, role: "admin", token, username: dbData.admin.username });
     }
@@ -251,7 +271,7 @@ async function startServer() {
       if (!reseller.is_active) {
         return res.status(403).json({ success: false, message: "Reseller account is disabled" });
       }
-      const token = crypto.randomBytes(16).toString("hex");
+      const token = crypto2.randomBytes(16).toString("hex");
       webSessions.set(token, { role: "reseller", username: reseller.username, reseller_id: reseller.id });
       return res.json({ success: true, role: "reseller", token, username: reseller.username, balance: reseller.balance });
     }
@@ -569,7 +589,7 @@ async function startServer() {
         }
         kRow.hwid_list.push(hwid);
       }
-      const sessionId2 = crypto.randomBytes(16).toString("hex");
+      const sessionId2 = crypto2.randomBytes(16).toString("hex");
       const sessionExpires2 = new Date(Math.min(expDate.getTime(), now.getTime() + Math.max(1, Number(process.env.SESSION_TTL_SECONDS) || 3600) * 1e3)).toISOString();
       dbData.sessions.push({
         session_id: sessionId2,
@@ -599,7 +619,7 @@ async function startServer() {
     }
     const activatedAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + kRow.duration_days * 24 * 60 * 60 * 1e3).toISOString();
-    const sessionId = crypto.randomBytes(16).toString("hex");
+    const sessionId = crypto2.randomBytes(16).toString("hex");
     const sessionExpires = new Date(Math.min(new Date(expiresAt).getTime(), now.getTime() + Math.max(1, Number(process.env.SESSION_TTL_SECONDS) || 3600) * 1e3)).toISOString();
     kRow.activated_at = activatedAt;
     kRow.expires_at = expiresAt;

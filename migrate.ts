@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { initializeFirebaseStore, firebaseOperation } from './firebase-store';
+import { deleteApp, getApps } from 'firebase-admin/app';
 
 dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
 const source = process.env.MIGRATION_SOURCE_FILE?.trim();
@@ -9,6 +10,10 @@ const allow = process.env.MIGRATION_ALLOW_WRITE === '1';
 if (!source) throw new Error('Set MIGRATION_SOURCE_FILE to an explicit JSON file');
 if (!process.env.FIREBASE_DATABASE_URL || !process.env.FIREBASE_DATABASE_PATH) throw new Error('Set FIREBASE_DATABASE_URL and a non-root FIREBASE_DATABASE_PATH');
 if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(process.env.FIREBASE_DATABASE_PATH)) throw new Error('FIREBASE_DATABASE_PATH must be a non-root path');
+const sourcePath = process.env.MIGRATION_SOURCE_PATH?.trim() || '/license_api';
+const destinationPath = process.env.FIREBASE_DATABASE_PATH;
+if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(sourcePath)) throw new Error('MIGRATION_SOURCE_PATH must be a non-root path');
+if (destinationPath === sourcePath || destinationPath.startsWith(sourcePath + '/') || sourcePath.startsWith(destinationPath + '/')) throw new Error('Migration destination must be separate from the preserved source namespace');
 
 async function main() {
   const raw = JSON.parse(fs.readFileSync(path.resolve(source!), 'utf8'));
@@ -22,4 +27,5 @@ async function main() {
   if (!result.committed) throw new Error('Destination is no longer empty; refusing overwrite');
   console.log('Migration completed to the configured isolated path with all six data fields.');
 }
-main().catch(e => { console.error('Migration failed:', e.message); process.exit(1); });
+main().catch(e => { console.error('Migration failed:', e.message); process.exitCode = 1; })
+  .finally(async () => { await Promise.all(getApps().filter(app => app.name.startsWith('license-api')).map(app => deleteApp(app))); });
