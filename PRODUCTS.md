@@ -26,7 +26,9 @@ Use `Content-Type: application/json` and `Accept: application/json`.
 {"license_key":"YOUR-KEY","hwid":"STABLE-DEVICE-ID"}
 ```
 
-No citizen ID is required. Existing aliases `key` and `device_fingerprint` remain supported; conflicting aliases fail. An optional `product_id` must match the key if supplied. Validate JSON rather than accepting HTTP 200 alone. The checked-in backend and isolated local tests confirm success fields `success: true`, nonempty `session_id`, `expires_at`, `session_expires_at`, `error_code: 0`, `message`, `plan`, and `heartbeat_interval`; this update adds `product_id` and `product_name` to activation success.
+No citizen ID is required. Public clients send `license_key` and `hwid` only, omitting `product_id`; the stored key determines the product. Use the current setup's existing Android-ID hash unchanged as the stable HWID, not a new format. The stable success contract is `success: true`, a nonempty `session_id`, `heartbeat_interval: 60` (seconds), and canonical license expiration in `user.expires_at` (ISO-8601 UTC). Validate the HTTP status and required JSON fields, then save the issued session. Do not require top-level `expires`, top-level `expires_at`, or response `product_id`. See [the complete client contract](docs/MOD-API.md).
+
+Existing request aliases `key` and `device_fingerprint` remain supported; conflicting aliases fail. Activation still accepts optional `product_id` for other consumers, which must match the key if supplied. Current activation responses also emit top-level `expires` and `expires_at` equal to `user.expires_at`, plus `session_expires_at`, `error_code`, `message`, `plan`, product metadata, and seller metadata. These are compatibility fields, not additional public-client prerequisites; this documentation alignment preserves them and does not change runtime behavior.
 
 **Heartbeat:** `POST /api/heartbeat`
 
@@ -34,7 +36,7 @@ No citizen ID is required. Existing aliases `key` and `device_fingerprint` remai
 {"license_key":"YOUR-KEY","hwid":"SAME-STABLE-DEVICE-ID","session_id":"ACTIVATION-SESSION-ID"}
 ```
 
-A successful heartbeat returns `success: true`, the matching session, expiration fields, and `message: "Heartbeat OK"`. Keep the same license, stable HWID and activation session. Session expiry is separate from license expiry. Do not require the proposed `features` or `session_valid` fields: they are not established fields in this implementation. Treat malformed JSON, missing required success fields and failure responses as failures.
+A successful heartbeat returns the same stable contract: `success: true`, the matching `session_id`, `heartbeat_interval: 60`, and `user.expires_at`. Send it every 60 seconds with the same license, unchanged HWID, and saved activation session, without `product_id`. Current heartbeat compatibility fields include top-level `expires_at`, `session_expires_at`, `error_code`, `message: "Heartbeat OK"`, `plan`, and seller metadata, but not `expires` or `product_id`. Session expiry is separate from license expiry; heartbeat does not extend either. Do not require `features` or `session_valid`: neither is emitted. Treat malformed JSON, missing required success fields and failure responses as failures.
 
 Safe live probes confirmed health HTTP 200 with Firebase storage, unknown activation key HTTP 404 (`error_code:1002`, `message:"Invalid license key"`, `session_id:null`), missing activation fields HTTP 400 (`error_code:1001`), and invalid heartbeat session HTTP 401 (`error_code:2002`, `message:"Invalid, revoked, or expired session ID"`). Errors use `message`, not the proposed `error` property. No real production key was activated: successful responses were verified against source and isolated tests, not a live valid license.
 
