@@ -38,6 +38,7 @@ const state = {
     valid('KURO-DISABLED-HEARTBEAT', 'disabled-device', { id: 14, is_disabled: 1 }),
     valid('KURO-EXPIRED-LICENSE', 'expired-license-device', { id: 15, expires_at: '2024-01-02T00:00:00.000Z' }),
     valid('KURO-REVOKED-BINDING', 'old-device', { id: 16, hwid_list: ['different-device'] }),
+    key('KURO-HASH-HWID', { id: 18 }),
     key('KURO-INVALID-ACTIVATION', { id: 17, hwid_list: ['invalid-device'] }),
     key('UNRELATED-KEY', { id: 99, product_id: 'aim-cheto', hwid_list: ['untouched-device'] })
   ],
@@ -88,11 +89,19 @@ async function call(route: string, body?: unknown) {
   return { status: response.status, body: await response.json() as Record<string, any> };
 }
 function snapshot() { const handle = new DatabaseSync(file); const row = handle.prepare('SELECT revision,value FROM state WHERE id=1').get() as { revision: number, value: string }; handle.close(); return { revision: row.revision, value: JSON.parse(row.value) as typeof state }; }
-const activatedKeys = new Set(['KURO-NO-PRODUCT', 'KURO-REPEAT', 'AIM-LEGACY', 'SAMURAI-LEGACY']);
+const activatedKeys = new Set(['KURO-NO-PRODUCT', 'KURO-REPEAT', 'AIM-LEGACY', 'SAMURAI-LEGACY', 'KURO-HASH-HWID']);
 function unrelated(value: typeof state) { return { admin: value.admin, resellers: value.resellers, prices: value.prices, balance_logs: value.balance_logs, untouched: value.keys.filter(k => !activatedKeys.has(k.key_value)) }; }
 const activationFields = ['success', 'error_code', 'message', 'session_id', 'expires_at', 'expires', 'plan', 'product_id', 'product_name', 'session_expires_at', 'heartbeat_interval', 'user', 'seller'];
 const heartbeatFields = ['success', 'error_code', 'message', 'session_id', 'expires_at', 'plan', 'session_expires_at', 'heartbeat_interval', 'user', 'seller'];
 function exact(body: Record<string, any>, fields: string[]) { assert.deepEqual(Object.keys(body).sort(), [...fields].sort()); }
+// Public contract checks intentionally do not depend on compatibility metadata.
+function core(body: Record<string, any>, label: string) {
+  assert.equal(body.success, true, label);
+  assert.equal(typeof body.session_id, 'string', label); assert.ok(body.session_id.length > 0, label);
+  assert.equal(body.heartbeat_interval, 60, label);
+  assert.equal(typeof body.user?.expires_at, 'string', label);
+  assert.equal(new Date(body.user.expires_at).toISOString(), body.user.expires_at, label);
+}
 function failure(result: { status: number, body: Record<string, any> }, status: number, code: number, message: string, before: ReturnType<typeof snapshot>, label: string, sessionId: string | null | undefined = undefined) {
   assert.equal(result.status, status, label); const expected = { success: false, error_code: code, message, ...(sessionId === undefined ? {} : { session_id: sessionId }) }; assert.deepEqual(result.body, expected, label); assert.deepEqual(snapshot(), before, label);
 }
@@ -102,14 +111,18 @@ try {
   const initial = snapshot();
   const kuro = await call('/api/activate', { license_key: 'KURO-NO-PRODUCT', hwid: 'kuro-device' });
   assert.equal(kuro.status, 200); assert.deepEqual(Object.keys(kuro.body).sort(), activationFields.sort());
-  assert.equal(kuro.body.success, true); assert.equal(kuro.body.error_code, 0); assert.equal(kuro.body.session_id.length, 32);
+  core(kuro.body, 'activation core contract without product_id'); assert.equal(kuro.body.session_id.length, 32);
   assert.equal(kuro.body.product_id, 'kuro'); assert.equal(kuro.body.product_name, 'KURO'); assert.equal(kuro.body.expires, kuro.body.expires_at); assert.equal(kuro.body.user.expires_at, kuro.body.expires_at);
   assert.equal(new Date(kuro.body.expires_at).toISOString(), kuro.body.expires_at); assert.equal(new Date(kuro.body.session_expires_at).toISOString(), kuro.body.session_expires_at);
+  const project = (body: Record<string, any>) => ({ success: body.success, session_id: body.session_id, heartbeat_interval: body.heartbeat_interval, user: { expires_at: body.user.expires_at } });
+  const projectedCore = project(kuro.body);
+  core(projectedCore, 'stable activation consumer ignores compatibility fields');
+  assert.equal(kuro.body.error_code, 0, 'existing activation compatibility code');
   assert.deepEqual(unrelated(snapshot().value), unrelated(initial.value));
 
   const repeat1 = await call('/api/activate', { license_key: 'KURO-REPEAT', hwid: 'repeat-device', product_id: 'kuro' });
   const repeat2 = await call('/api/activate', { license_key: 'KURO-REPEAT', hwid: 'repeat-device', product_id: 'kuro' });
-  for (const result of [repeat1, repeat2]) { assert.equal(result.status, 200); exact(result.body, activationFields); assert.equal(result.body.success, true); assert.equal(result.body.error_code, 0); assert.equal(result.body.product_id, 'kuro'); assert.equal(result.body.expires, result.body.expires_at); assert.equal(new Date(result.body.expires_at).toISOString(), result.body.expires_at); }
+  for (const result of [repeat1, repeat2]) { assert.equal(result.status, 200); exact(result.body, activationFields); core(result.body, 'activation core contract with product_id'); assert.equal(result.body.product_id, 'kuro'); assert.equal(result.body.expires, result.body.expires_at); assert.equal(new Date(result.body.expires_at).toISOString(), result.body.expires_at); }
   assert.notEqual(repeat1.body.session_id, repeat2.body.session_id); assert.equal(repeat1.body.expires_at, repeat2.body.expires_at);
   const aim = await call('/api/activate', { license_key: 'AIM-LEGACY', hwid: 'aim-device' });
   const samurai = await call('/api/activate', { license_key: 'SAMURAI-LEGACY', hwid: 'samurai-device' });
@@ -121,12 +134,28 @@ try {
   failure(await call('/api/activate', { license_key: 'KURO-NO-PRODUCT', hwid: 'x', product_id: 'not-a-product' }), 400, 1001, 'Unknown product_id', unknownBefore, 'unknown activation product');
 
   const heartbeat = await call('/api/heartbeat', { license_key: 'KURO-HEARTBEAT-TARGET', session_id: 'target-session', hwid: 'target-device' });
-  assert.equal(heartbeat.status, 200); exact(heartbeat.body, heartbeatFields); assert.deepEqual(heartbeat.body, { success: true, error_code: 0, message: 'Heartbeat OK', session_id: 'target-session', expires_at: '2099-01-01T00:00:00.000Z', plan: '7 Days', session_expires_at: '2099-01-01T00:00:00.000Z', heartbeat_interval: 60, user: { expires_at: '2099-01-01T00:00:00.000Z' }, seller: { name: 'Shadow Cracker' } });
+  assert.equal(heartbeat.status, 200); exact(heartbeat.body, heartbeatFields); core(heartbeat.body, 'heartbeat core contract'); assert.deepEqual(heartbeat.body, { success: true, error_code: 0, message: 'Heartbeat OK', session_id: 'target-session', expires_at: '2099-01-01T00:00:00.000Z', plan: '7 Days', session_expires_at: '2099-01-01T00:00:00.000Z', heartbeat_interval: 60, user: { expires_at: '2099-01-01T00:00:00.000Z' }, seller: { name: 'Shadow Cracker' } });
+  const hashLikeHwid = 'a4f6c2d8e1b9470fa8c31d5e6b7290c4f1a8e3d7b2c6950f8e4d1a7c3b9e6f20';
+  const hashActivation = await call('/api/activate', { license_key: 'KURO-HASH-HWID', hwid: hashLikeHwid });
+  assert.equal(hashActivation.status, 200); exact(hashActivation.body, activationFields); core(hashActivation.body, 'hash-like HWID activation without product_id');
+  const hashHeartbeat = await call('/api/heartbeat', { license_key: 'KURO-HASH-HWID', session_id: hashActivation.body.session_id, hwid: hashLikeHwid });
+  assert.equal(hashHeartbeat.status, 200); exact(hashHeartbeat.body, heartbeatFields); core(hashHeartbeat.body, 'hash-like HWID heartbeat');
+  core(project(hashHeartbeat.body), 'stable heartbeat consumer ignores compatibility fields');
+  assert.equal(hashHeartbeat.body.session_id, hashActivation.body.session_id);
+  assert.equal(hashHeartbeat.body.user.expires_at, hashActivation.body.user.expires_at);
+  // This opaque synthetic value does not specify or replace the Android hash algorithm.
+  assert.deepEqual(snapshot().value.keys.find(k => k.key_value === 'KURO-HASH-HWID')!.hwid_list, [hashLikeHwid]);
   await stop(); await start();
   const issuedHeartbeat = await call('/api/heartbeat', { license_key: 'KURO-NO-PRODUCT', session_id: kuro.body.session_id, hwid: 'kuro-device' });
   assert.equal(issuedHeartbeat.status, 200); exact(issuedHeartbeat.body, heartbeatFields);
   assert.equal(issuedHeartbeat.body.success, true); assert.equal(issuedHeartbeat.body.session_id, kuro.body.session_id);
   assert.equal(issuedHeartbeat.body.expires_at, kuro.body.expires_at); assert.equal(issuedHeartbeat.body.session_expires_at, kuro.body.session_expires_at);
+  const persistedHashHeartbeat = await call('/api/heartbeat', { license_key: 'KURO-HASH-HWID', session_id: hashActivation.body.session_id, hwid: hashLikeHwid });
+  assert.equal(persistedHashHeartbeat.status, 200); exact(persistedHashHeartbeat.body, heartbeatFields); core(persistedHashHeartbeat.body, 'hash-like HWID session persists after restart');
+  assert.equal(persistedHashHeartbeat.body.session_id, hashActivation.body.session_id);
+  assert.equal(persistedHashHeartbeat.body.user.expires_at, hashActivation.body.user.expires_at);
+  const wrongHashBefore = snapshot();
+  failure(await call('/api/heartbeat', { license_key: 'KURO-HASH-HWID', session_id: hashActivation.body.session_id, hwid: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' }), 403, 2005, 'HWID mismatch on heartbeat', wrongHashBefore, 'wrong hash-like HWID is rejected without mutation');
   const afterRestart = await call('/api/heartbeat', { license_key: 'KURO-HEARTBEAT-TARGET', session_id: 'target-session', hwid: 'target-device' });
   assert.equal(afterRestart.status, 200); assert.equal(afterRestart.body.success, true); assert.equal(afterRestart.body.session_id, 'target-session'); assert.equal(afterRestart.body.session_expires_at, heartbeat.body.session_expires_at); assert.equal(afterRestart.body.expires_at, heartbeat.body.expires_at); assert.equal(afterRestart.body.heartbeat_interval, 60);
 
